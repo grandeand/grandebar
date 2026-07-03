@@ -60,7 +60,11 @@ private enum UI {
 
 private enum Theme {
     static var appAppearance: NSAppearance? {
-        switch AppConfig.appearanceMode() {
+        appearance(for: AppConfig.appearanceMode())
+    }
+
+    static func appearance(for mode: String) -> NSAppearance? {
+        switch mode {
         case "dark": return NSAppearance(named: .darkAqua)
         case "light": return NSAppearance(named: .aqua)
         default: return nil
@@ -515,8 +519,11 @@ final class QuotaViewController: NSViewController {
             appearancePopup.lastItem?.representedObject = mode
         }
         appearancePopup.selectItem(withTitle: AppConfig.appearanceTitle(for: AppConfig.appearanceMode()))
+        appearancePopup.target = self
+        appearancePopup.action = #selector(settingsAppearanceChanged(_:))
 
         let settingsView = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 186))
+        settingsView.appearance = Theme.appAppearance
         let baseLabel = NSTextField(labelWithString: "Base URL")
         let keyLabel = NSTextField(labelWithString: "Management key")
         let autoRefreshLabel = NSTextField(labelWithString: "Auto refresh")
@@ -546,6 +553,7 @@ final class QuotaViewController: NSViewController {
         alert.accessoryView = settingsView
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
+        alert.window.appearance = Theme.appAppearance
 
         if alert.runModal() == .alertFirstButtonReturn {
             UserDefaults.standard.set(AppConfig.normalizedBase(baseField.stringValue), forKey: AppConfig.apiBaseKey)
@@ -557,6 +565,14 @@ final class QuotaViewController: NSViewController {
             updateAutoRefreshTimer()
             setLaunchAtLogin(launchAtLogin.state == .on)
         }
+    }
+
+    @objc private func settingsAppearanceChanged(_ sender: NSPopUpButton) {
+        let mode = sender.selectedItem?.representedObject as? String ?? "auto"
+        let appearance = Theme.appearance(for: mode)
+        sender.window?.appearance = appearance
+        sender.window?.contentView?.appearance = appearance
+        sender.superview?.appearance = appearance
     }
 
     private func reloadViewForAppearance() {
