@@ -41,7 +41,19 @@ GrandeBar looks for `ccusage` in:
 brew install --cask grandeand/tap/grandebar
 ```
 
-The current release is unsigned. Homebrew can install it, but macOS may warn on first launch because the app is not signed and notarized yet. If that happens, open it once from Finder with right click, then `Open`.
+The current release is unsigned. Homebrew can install it, but macOS may warn on first launch because the app is not signed and notarized yet.
+
+If macOS says the app is damaged or should be moved to Trash, remove the quarantine flag:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/GrandeBar.app
+```
+
+You can also install without quarantine:
+
+```bash
+brew install --cask --no-quarantine grandeand/tap/grandebar
+```
 
 ## Setup
 
