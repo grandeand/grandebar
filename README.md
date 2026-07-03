@@ -87,6 +87,7 @@ Right-click the menu bar icon, open `Settings`, then set:
 - `Base URL`: your CLIProxyAPI Management Center origin, for example `http://localhost:8317`.
 - `Management key`: your management API key.
 - `Auto refresh`: optional refresh interval.
+- `Appearance`: Auto, Light, or Dark.
 - `Launch at Login`: optional macOS login item.
 
 ## How It Works

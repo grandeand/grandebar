@@ -9,6 +9,8 @@ private enum AppConfig {
     static let lastRefreshKey = "lastRefreshAt"
     static let autoRefreshMinutesKey = "autoRefreshMinutes"
     static let autoRefreshOptions = [0, 5, 10, 15, 30, 60]
+    static let appearanceKey = "appearanceMode"
+    static let appearanceOptions = ["auto", "light", "dark"]
 
     static func apiBase() -> String {
         let saved = UserDefaults.standard.string(forKey: apiBaseKey) ?? defaultAPIBase
@@ -28,6 +30,19 @@ private enum AppConfig {
         minutes == 0 ? "Manual only" : "\(minutes) min"
     }
 
+    static func appearanceMode() -> String {
+        let saved = UserDefaults.standard.string(forKey: appearanceKey) ?? "auto"
+        return appearanceOptions.contains(saved) ? saved : "auto"
+    }
+
+    static func appearanceTitle(for mode: String) -> String {
+        switch mode {
+        case "light": return "Light"
+        case "dark": return "Dark"
+        default: return "Auto"
+        }
+    }
+
     static func normalizedBase(_ value: String) -> String {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         let withScheme = trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") ? trimmed : "https://\(trimmed)"
@@ -44,8 +59,19 @@ private enum UI {
 }
 
 private enum Theme {
+    static var appAppearance: NSAppearance? {
+        switch AppConfig.appearanceMode() {
+        case "dark": return NSAppearance(named: .darkAqua)
+        case "light": return NSAppearance(named: .aqua)
+        default: return nil
+        }
+    }
+
     static var isDark: Bool {
-        UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
+        let mode = AppConfig.appearanceMode()
+        if mode == "dark" { return true }
+        if mode == "light" { return false }
+        return UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
     }
     static var rootBackground: NSColor {
         isDark
@@ -262,6 +288,7 @@ final class QuotaViewController: NSViewController {
 
     override func loadView() {
         let root = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: UI.popoverWidth, height: UI.popoverHeight))
+        root.appearance = Theme.appAppearance
         root.material = .popover
         root.blendingMode = .behindWindow
         root.state = .active
@@ -473,6 +500,7 @@ final class QuotaViewController: NSViewController {
         let baseField = NSTextField(string: AppConfig.apiBase())
         let keyField = NSSecureTextField(string: UserDefaults.standard.string(forKey: AppConfig.defaultsKey) ?? "")
         let autoRefreshPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        let appearancePopup = NSPopUpButton(frame: .zero, pullsDown: false)
         let launchAtLogin = NSButton(checkboxWithTitle: "Launch at Login", target: nil, action: nil)
         launchAtLogin.state = SMAppService.mainApp.status == .enabled ? .on : .off
         baseField.placeholderString = "https://ai.example.com"
@@ -482,30 +510,40 @@ final class QuotaViewController: NSViewController {
             autoRefreshPopup.lastItem?.representedObject = minutes
         }
         autoRefreshPopup.selectItem(withTitle: AppConfig.autoRefreshTitle(for: AppConfig.autoRefreshMinutes()))
+        for mode in AppConfig.appearanceOptions {
+            appearancePopup.addItem(withTitle: AppConfig.appearanceTitle(for: mode))
+            appearancePopup.lastItem?.representedObject = mode
+        }
+        appearancePopup.selectItem(withTitle: AppConfig.appearanceTitle(for: AppConfig.appearanceMode()))
 
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 158))
+        let settingsView = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 186))
         let baseLabel = NSTextField(labelWithString: "Base URL")
         let keyLabel = NSTextField(labelWithString: "Management key")
         let autoRefreshLabel = NSTextField(labelWithString: "Auto refresh")
-        baseLabel.frame = NSRect(x: 0, y: 134, width: 340, height: 18)
-        baseField.frame = NSRect(x: 0, y: 106, width: 340, height: 24)
-        keyLabel.frame = NSRect(x: 0, y: 80, width: 340, height: 18)
-        keyField.frame = NSRect(x: 0, y: 52, width: 340, height: 24)
-        autoRefreshLabel.frame = NSRect(x: 0, y: 24, width: 150, height: 22)
-        autoRefreshPopup.frame = NSRect(x: 156, y: 22, width: 184, height: 26)
+        let appearanceLabel = NSTextField(labelWithString: "Appearance")
+        baseLabel.frame = NSRect(x: 0, y: 162, width: 340, height: 18)
+        baseField.frame = NSRect(x: 0, y: 134, width: 340, height: 24)
+        keyLabel.frame = NSRect(x: 0, y: 108, width: 340, height: 18)
+        keyField.frame = NSRect(x: 0, y: 80, width: 340, height: 24)
+        autoRefreshLabel.frame = NSRect(x: 0, y: 52, width: 150, height: 22)
+        autoRefreshPopup.frame = NSRect(x: 156, y: 50, width: 184, height: 26)
+        appearanceLabel.frame = NSRect(x: 0, y: 24, width: 150, height: 22)
+        appearancePopup.frame = NSRect(x: 156, y: 22, width: 184, height: 26)
         launchAtLogin.frame = NSRect(x: 0, y: -4, width: 340, height: 22)
-        view.addSubview(baseLabel)
-        view.addSubview(baseField)
-        view.addSubview(keyLabel)
-        view.addSubview(keyField)
-        view.addSubview(autoRefreshLabel)
-        view.addSubview(autoRefreshPopup)
-        view.addSubview(launchAtLogin)
+        settingsView.addSubview(baseLabel)
+        settingsView.addSubview(baseField)
+        settingsView.addSubview(keyLabel)
+        settingsView.addSubview(keyField)
+        settingsView.addSubview(autoRefreshLabel)
+        settingsView.addSubview(autoRefreshPopup)
+        settingsView.addSubview(appearanceLabel)
+        settingsView.addSubview(appearancePopup)
+        settingsView.addSubview(launchAtLogin)
 
         let alert = NSAlert()
         alert.messageText = "GrandeBar Settings"
         alert.informativeText = "Panel adresi ve management key burada saklanır."
-        alert.accessoryView = view
+        alert.accessoryView = settingsView
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
 
@@ -513,9 +551,24 @@ final class QuotaViewController: NSViewController {
             UserDefaults.standard.set(AppConfig.normalizedBase(baseField.stringValue), forKey: AppConfig.apiBaseKey)
             UserDefaults.standard.set(keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: AppConfig.defaultsKey)
             UserDefaults.standard.set(autoRefreshPopup.selectedItem?.representedObject as? Int ?? 0, forKey: AppConfig.autoRefreshMinutesKey)
+            UserDefaults.standard.set(appearancePopup.selectedItem?.representedObject as? String ?? "auto", forKey: AppConfig.appearanceKey)
             UserDefaults.standard.synchronize()
+            reloadViewForAppearance()
             updateAutoRefreshTimer()
             setLaunchAtLogin(launchAtLogin.state == .on)
+        }
+    }
+
+    private func reloadViewForAppearance() {
+        let cards = latestCards
+        let usage = latestUsage
+        loadView()
+        latestUsage = usage
+        if let usage {
+            usageLabel.stringValue = "Today \(LocalCodexUsage.format(usage.today)) · Week \(LocalCodexUsage.format(usage.week)) · Month \(LocalCodexUsage.format(usage.month))"
+        }
+        if !cards.isEmpty {
+            render(cards: cards)
         }
     }
 
