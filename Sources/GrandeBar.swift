@@ -43,6 +43,41 @@ private enum UI {
     static let summaryCardHeight: CGFloat = 104
 }
 
+private enum Theme {
+    static let rootBackground = adaptive(
+        light: NSColor(calibratedRed: 0.93, green: 0.95, blue: 0.97, alpha: 0.96),
+        dark: NSColor(calibratedRed: 0.035, green: 0.055, blue: 0.078, alpha: 0.94)
+    )
+    static let cardBackground = adaptive(
+        light: NSColor(calibratedRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.82),
+        dark: NSColor(calibratedRed: 0.055, green: 0.077, blue: 0.102, alpha: 0.72)
+    )
+    static let footerBackground = adaptive(
+        light: NSColor(calibratedRed: 0.98, green: 0.985, blue: 0.99, alpha: 0.86),
+        dark: NSColor(calibratedRed: 0.055, green: 0.075, blue: 0.095, alpha: 0.78)
+    )
+    static let errorBackground = adaptive(
+        light: NSColor(calibratedRed: 1.0, green: 0.92, blue: 0.91, alpha: 0.86),
+        dark: NSColor(calibratedRed: 0.18, green: 0.08, blue: 0.08, alpha: 0.72)
+    )
+    static let border = adaptive(light: NSColor.black.withAlphaComponent(0.12), dark: NSColor.white.withAlphaComponent(0.11))
+    static let cardBorder = adaptive(light: NSColor.black.withAlphaComponent(0.10), dark: NSColor.white.withAlphaComponent(0.10))
+    static let divider = adaptive(light: NSColor.black.withAlphaComponent(0.10), dark: NSColor.white.withAlphaComponent(0.12))
+    static let subtleDivider = adaptive(light: NSColor.black.withAlphaComponent(0.08), dark: NSColor.white.withAlphaComponent(0.08))
+    static let progressTrack = adaptive(light: NSColor.black.withAlphaComponent(0.12), dark: NSColor.black.withAlphaComponent(0.34))
+    static let primaryText = NSColor.labelColor
+    static let secondaryText = NSColor.secondaryLabelColor
+    static let mutedText = NSColor.tertiaryLabelColor
+    static let buttonTint = NSColor.labelColor.withAlphaComponent(0.82)
+    static let shadow = adaptive(light: NSColor.black.withAlphaComponent(0.20), dark: NSColor.black.withAlphaComponent(0.10))
+
+    private static func adaptive(light: NSColor, dark: NSColor) -> NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+        }
+    }
+}
+
 private struct QuotaCard {
     let name: String
     let plan: String
@@ -230,7 +265,7 @@ final class QuotaViewController: NSViewController {
         root.blendingMode = .behindWindow
         root.state = .active
         root.wantsLayer = true
-        root.layer?.backgroundColor = NSColor(calibratedRed: 0.035, green: 0.055, blue: 0.078, alpha: 0.94).cgColor
+        root.layer?.backgroundColor = Theme.rootBackground.cgColor
         root.widthAnchor.constraint(equalToConstant: UI.popoverWidth).isActive = true
         root.heightAnchor.constraint(equalToConstant: UI.popoverHeight).isActive = true
 
@@ -250,11 +285,11 @@ final class QuotaViewController: NSViewController {
 
         let title = NSTextField(labelWithString: "GrandeBar")
         title.font = .systemFont(ofSize: 15, weight: .bold)
-        title.textColor = .white
+        title.textColor = Theme.primaryText
 
         subtitleLabel = NSTextField(labelWithString: "Codex quota")
         subtitleLabel.font = .systemFont(ofSize: 10, weight: .medium)
-        subtitleLabel.textColor = NSColor.white.withAlphaComponent(0.64)
+        subtitleLabel.textColor = Theme.secondaryText
         subtitleLabel.lineBreakMode = .byTruncatingMiddle
         subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
@@ -273,7 +308,7 @@ final class QuotaViewController: NSViewController {
         let divider = NSView()
         divider.translatesAutoresizingMaskIntoConstraints = false
         divider.wantsLayer = true
-        divider.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        divider.layer?.backgroundColor = Theme.divider.cgColor
 
         stackView = FlippedStackView()
         stackView.frame = NSRect(x: 0, y: 0, width: UI.popoverWidth, height: 1)
@@ -289,23 +324,23 @@ final class QuotaViewController: NSViewController {
         scrollView.borderType = .noBorder
         scrollView.documentView = stackView
 
-        let footer = RoundedView(color: NSColor(calibratedRed: 0.055, green: 0.075, blue: 0.095, alpha: 0.78), radius: 8, borderColor: NSColor.white.withAlphaComponent(0.11))
+        let footer = RoundedView(color: Theme.footerBackground, radius: 8, borderColor: Theme.border)
         footer.translatesAutoresizingMaskIntoConstraints = false
 
         let footerTitle = NSTextField(labelWithString: "ccusage")
         footerTitle.font = .systemFont(ofSize: 10, weight: .medium)
-        footerTitle.textColor = NSColor.white.withAlphaComponent(0.70)
+        footerTitle.textColor = Theme.secondaryText
         footerTitle.translatesAutoresizingMaskIntoConstraints = false
 
         lastRefreshLabel = NSTextField(labelWithString: "Son Güncelleme: yok")
         lastRefreshLabel.font = .monospacedDigitSystemFont(ofSize: 9, weight: .semibold)
-        lastRefreshLabel.textColor = NSColor.white.withAlphaComponent(0.45)
+        lastRefreshLabel.textColor = Theme.mutedText
         lastRefreshLabel.alignment = .right
         lastRefreshLabel.translatesAutoresizingMaskIntoConstraints = false
 
         usageLabel = NSTextField(labelWithString: "Today -- · Week -- · Month --")
         usageLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .semibold)
-        usageLabel.textColor = NSColor.white.withAlphaComponent(0.82)
+        usageLabel.textColor = Theme.primaryText
         usageLabel.lineBreakMode = .byTruncatingTail
         usageLabel.translatesAutoresizingMaskIntoConstraints = false
         usageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -520,7 +555,7 @@ final class QuotaViewController: NSViewController {
         clearCards()
         let label = NSTextField(labelWithString: "Refresh'e bas")
         label.font = .systemFont(ofSize: 14, weight: .medium)
-        label.textColor = NSColor.white.withAlphaComponent(0.6)
+        label.textColor = Theme.secondaryText
         stackView.addArrangedSubview(label)
         resizeDocument(rowCount: 1)
     }
@@ -593,7 +628,7 @@ final class QuotaViewController: NSViewController {
         subtitleLabel.stringValue = "Could not load quota"
         statusUpdate(message.contains("IP banned") ? "ban" : "err", message)
 
-        let box = RoundedView(color: NSColor(calibratedRed: 0.18, green: 0.08, blue: 0.08, alpha: 0.72), radius: 16)
+        let box = RoundedView(color: Theme.errorBackground, radius: 16, borderColor: Theme.border)
         box.translatesAutoresizingMaskIntoConstraints = false
 
         let icon = NSImageView(image: NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil) ?? NSImage())
@@ -602,7 +637,7 @@ final class QuotaViewController: NSViewController {
 
         let label = NSTextField(wrappingLabelWithString: message)
         label.font = .systemFont(ofSize: 13, weight: .medium)
-        label.textColor = .white
+        label.textColor = Theme.primaryText
         label.translatesAutoresizingMaskIntoConstraints = false
 
         box.addSubview(icon)
@@ -738,7 +773,7 @@ final class QuotaViewController: NSViewController {
         button.bezelStyle = .rounded
         button.isBordered = true
         button.font = .systemFont(ofSize: 10, weight: .semibold)
-        button.contentTintColor = NSColor.white.withAlphaComponent(0.86)
+        button.contentTintColor = Theme.buttonTint
         button.translatesAutoresizingMaskIntoConstraints = false
         button.widthAnchor.constraint(equalToConstant: width).isActive = true
         button.heightAnchor.constraint(equalToConstant: 28).isActive = true
@@ -754,7 +789,7 @@ final class QuotaViewController: NSViewController {
         button.bezelStyle = .regularSquare
         button.isBordered = false
         button.controlSize = .small
-        button.contentTintColor = NSColor.white.withAlphaComponent(0.78)
+        button.contentTintColor = Theme.buttonTint
         button.translatesAutoresizingMaskIntoConstraints = false
         button.widthAnchor.constraint(equalToConstant: 19).isActive = true
         button.heightAnchor.constraint(equalToConstant: 19).isActive = true
@@ -764,9 +799,9 @@ final class QuotaViewController: NSViewController {
 
 private final class AccountCardView: RoundedView {
     init(card: QuotaCard) {
-        super.init(color: NSColor(calibratedRed: 0.055, green: 0.077, blue: 0.102, alpha: 0.72), radius: 8, borderColor: NSColor.white.withAlphaComponent(0.10))
+        super.init(color: Theme.cardBackground, radius: 8, borderColor: Theme.cardBorder)
         translatesAutoresizingMaskIntoConstraints = false
-        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowColor = Theme.shadow.cgColor
         layer?.shadowOpacity = 0.10
         layer?.shadowRadius = 7
         layer?.shadowOffset = NSSize(width: 0, height: -1)
@@ -778,13 +813,13 @@ private final class AccountCardView: RoundedView {
 
         let name = NSTextField(labelWithString: compactName(card.name))
         name.font = .systemFont(ofSize: 13, weight: .semibold)
-        name.textColor = .white
+        name.textColor = Theme.primaryText
         name.lineBreakMode = .byTruncatingMiddle
         name.translatesAutoresizingMaskIntoConstraints = false
 
         let resetCount = NSTextField(labelWithString: resetCountText(card))
         resetCount.font = .systemFont(ofSize: 11, weight: .semibold)
-        resetCount.textColor = NSColor.white.withAlphaComponent(0.82)
+        resetCount.textColor = Theme.primaryText
         resetCount.alignment = .right
         resetCount.lineBreakMode = .byTruncatingMiddle
         resetCount.translatesAutoresizingMaskIntoConstraints = false
@@ -792,7 +827,7 @@ private final class AccountCardView: RoundedView {
 
         let resetExpiry = NSTextField(labelWithString: resetExpiryText(card))
         resetExpiry.font = .monospacedDigitSystemFont(ofSize: 9, weight: .medium)
-        resetExpiry.textColor = NSColor.white.withAlphaComponent(0.52)
+        resetExpiry.textColor = Theme.mutedText
         resetExpiry.alignment = .right
         resetExpiry.lineBreakMode = .byTruncatingMiddle
         resetExpiry.translatesAutoresizingMaskIntoConstraints = false
@@ -805,7 +840,7 @@ private final class AccountCardView: RoundedView {
 
         let separator = NSView()
         separator.wantsLayer = true
-        separator.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
+        separator.layer?.backgroundColor = Theme.subtleDivider.cgColor
         separator.translatesAutoresizingMaskIntoConstraints = false
 
         addSubview(accent)
@@ -883,7 +918,7 @@ private final class AccountCardView: RoundedView {
 
 private final class TotalLimitCardView: RoundedView {
     init(summary: TotalLimitSummary) {
-        super.init(color: NSColor(calibratedRed: 0.055, green: 0.075, blue: 0.098, alpha: 0.76), radius: 8, borderColor: NSColor.white.withAlphaComponent(0.14))
+        super.init(color: Theme.cardBackground, radius: 8, borderColor: Theme.border)
 
         let sessionPercent = percent(remaining: summary.sessionRemaining, total: summary.sessionTotal)
         let weeklyPercent = percent(remaining: summary.weeklyRemaining, total: summary.weeklyTotal)
@@ -932,7 +967,7 @@ private final class TotalLimitCardView: RoundedView {
     }
 
     private func color(for percent: Int?) -> NSColor {
-        guard let percent else { return NSColor.white.withAlphaComponent(0.55) }
+        guard let percent else { return Theme.mutedText }
         if percent <= 20 { return NSColor(calibratedRed: 1.0, green: 0.31, blue: 0.29, alpha: 1) }
         if percent <= 60 { return NSColor(calibratedRed: 1.0, green: 0.72, blue: 0.25, alpha: 1) }
         return NSColor(calibratedRed: 0.42, green: 0.84, blue: 0.34, alpha: 1)
@@ -941,7 +976,7 @@ private final class TotalLimitCardView: RoundedView {
     private func divider() -> NSView {
         let view = NSView()
         view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.18).cgColor
+        view.layer?.backgroundColor = Theme.divider.cgColor
         return view
     }
 }
@@ -952,7 +987,7 @@ private final class TotalMetricView: RoundedView {
 
         let titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        titleLabel.textColor = NSColor.white.withAlphaComponent(0.76)
+        titleLabel.textColor = Theme.secondaryText
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
         let valueLabel = NSTextField(labelWithString: value)
@@ -963,7 +998,7 @@ private final class TotalMetricView: RoundedView {
 
         let detailLabel = NSTextField(labelWithString: detail)
         detailLabel.font = .systemFont(ofSize: 9, weight: .medium)
-        detailLabel.textColor = NSColor.white.withAlphaComponent(0.58)
+        detailLabel.textColor = Theme.mutedText
         detailLabel.alignment = .center
         detailLabel.translatesAutoresizingMaskIntoConstraints = false
 
@@ -1015,13 +1050,13 @@ private final class MetricView: NSView {
 
         let titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        titleLabel.textColor = NSColor.white.withAlphaComponent(0.80)
+        titleLabel.textColor = Theme.secondaryText
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
 
         let timeLabel = NSTextField(labelWithString: formatDuration(resetSeconds))
         timeLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
-        timeLabel.textColor = NSColor.white.withAlphaComponent(0.62)
+        timeLabel.textColor = Theme.mutedText
         timeLabel.alignment = .right
         timeLabel.lineBreakMode = .byTruncatingTail
         timeLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -1069,7 +1104,7 @@ private final class MetricView: NSView {
     }
 
     private func color(for percent: Int?) -> NSColor {
-        guard let percent else { return NSColor.white.withAlphaComponent(0.45) }
+        guard let percent else { return Theme.mutedText }
         if percent <= 20 { return NSColor(calibratedRed: 1.0, green: 0.31, blue: 0.29, alpha: 1) }
         if percent <= 60 { return NSColor(calibratedRed: 1.0, green: 0.72, blue: 0.25, alpha: 1) }
         return NSColor(calibratedRed: 0.42, green: 0.84, blue: 0.34, alpha: 1)
@@ -1100,7 +1135,7 @@ private final class ProgressBar: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        NSColor.black.withAlphaComponent(0.34).setFill()
+        Theme.progressTrack.setFill()
         NSBezierPath(roundedRect: bounds, xRadius: bounds.height / 2, yRadius: bounds.height / 2).fill()
 
         guard let percent else { return }
