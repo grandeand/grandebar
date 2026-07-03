@@ -44,38 +44,39 @@ private enum UI {
 }
 
 private enum Theme {
-    static let rootBackground = adaptive(
-        light: NSColor(calibratedRed: 0.93, green: 0.95, blue: 0.97, alpha: 0.96),
-        dark: NSColor(calibratedRed: 0.035, green: 0.055, blue: 0.078, alpha: 0.94)
-    )
-    static let cardBackground = adaptive(
-        light: NSColor(calibratedRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.82),
-        dark: NSColor(calibratedRed: 0.055, green: 0.077, blue: 0.102, alpha: 0.72)
-    )
-    static let footerBackground = adaptive(
-        light: NSColor(calibratedRed: 0.98, green: 0.985, blue: 0.99, alpha: 0.86),
-        dark: NSColor(calibratedRed: 0.055, green: 0.075, blue: 0.095, alpha: 0.78)
-    )
-    static let errorBackground = adaptive(
-        light: NSColor(calibratedRed: 1.0, green: 0.92, blue: 0.91, alpha: 0.86),
-        dark: NSColor(calibratedRed: 0.18, green: 0.08, blue: 0.08, alpha: 0.72)
-    )
-    static let border = adaptive(light: NSColor.black.withAlphaComponent(0.12), dark: NSColor.white.withAlphaComponent(0.11))
-    static let cardBorder = adaptive(light: NSColor.black.withAlphaComponent(0.10), dark: NSColor.white.withAlphaComponent(0.10))
-    static let divider = adaptive(light: NSColor.black.withAlphaComponent(0.10), dark: NSColor.white.withAlphaComponent(0.12))
-    static let subtleDivider = adaptive(light: NSColor.black.withAlphaComponent(0.08), dark: NSColor.white.withAlphaComponent(0.08))
-    static let progressTrack = adaptive(light: NSColor.black.withAlphaComponent(0.12), dark: NSColor.black.withAlphaComponent(0.34))
+    static var isDark: Bool {
+        UserDefaults.standard.string(forKey: "AppleInterfaceStyle") == "Dark"
+    }
+    static var rootBackground: NSColor {
+        isDark
+            ? NSColor(calibratedRed: 0.035, green: 0.055, blue: 0.078, alpha: 0.94)
+            : NSColor(calibratedRed: 0.93, green: 0.95, blue: 0.97, alpha: 0.96)
+    }
+    static var cardBackground: NSColor {
+        isDark
+            ? NSColor(calibratedRed: 0.055, green: 0.077, blue: 0.102, alpha: 0.72)
+            : NSColor(calibratedRed: 1.0, green: 1.0, blue: 1.0, alpha: 0.82)
+    }
+    static var footerBackground: NSColor {
+        isDark
+            ? NSColor(calibratedRed: 0.055, green: 0.075, blue: 0.095, alpha: 0.78)
+            : NSColor(calibratedRed: 0.98, green: 0.985, blue: 0.99, alpha: 0.86)
+    }
+    static var errorBackground: NSColor {
+        isDark
+            ? NSColor(calibratedRed: 0.18, green: 0.08, blue: 0.08, alpha: 0.72)
+            : NSColor(calibratedRed: 1.0, green: 0.92, blue: 0.91, alpha: 0.86)
+    }
+    static var border: NSColor { isDark ? NSColor.white.withAlphaComponent(0.11) : NSColor.black.withAlphaComponent(0.12) }
+    static var cardBorder: NSColor { isDark ? NSColor.white.withAlphaComponent(0.10) : NSColor.black.withAlphaComponent(0.10) }
+    static var divider: NSColor { isDark ? NSColor.white.withAlphaComponent(0.12) : NSColor.black.withAlphaComponent(0.10) }
+    static var subtleDivider: NSColor { isDark ? NSColor.white.withAlphaComponent(0.08) : NSColor.black.withAlphaComponent(0.08) }
+    static var progressTrack: NSColor { isDark ? NSColor.black.withAlphaComponent(0.34) : NSColor.black.withAlphaComponent(0.12) }
     static let primaryText = NSColor.labelColor
     static let secondaryText = NSColor.secondaryLabelColor
     static let mutedText = NSColor.tertiaryLabelColor
     static let buttonTint = NSColor.labelColor.withAlphaComponent(0.82)
-    static let shadow = adaptive(light: NSColor.black.withAlphaComponent(0.20), dark: NSColor.black.withAlphaComponent(0.10))
-
-    private static func adaptive(light: NSColor, dark: NSColor) -> NSColor {
-        NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
-        }
-    }
+    static var shadow: NSColor { NSColor.black.withAlphaComponent(isDark ? 0.10 : 0.20) }
 }
 
 private struct QuotaCard {
