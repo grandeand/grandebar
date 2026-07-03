@@ -102,6 +102,7 @@ Right-click the menu bar icon, open `Settings`, then set:
 - `Management key`: your management API key.
 - `Auto refresh`: optional refresh interval.
 - `Appearance`: Auto, Light, or Dark.
+- `Language`: System, English, or Türkçe.
 - `Launch at Login`: optional macOS login item.
 
 ## How It Works

@@ -11,6 +11,8 @@ private enum AppConfig {
     static let autoRefreshOptions = [0, 5, 10, 15, 30, 60]
     static let appearanceKey = "appearanceMode"
     static let appearanceOptions = ["auto", "light", "dark"]
+    static let languageKey = "languageMode"
+    static let languageOptions = ["auto", "en", "tr"]
 
     static func apiBase() -> String {
         let saved = UserDefaults.standard.string(forKey: apiBaseKey) ?? defaultAPIBase
@@ -33,7 +35,7 @@ private enum AppConfig {
     }
 
     static func autoRefreshTitle(for minutes: Int) -> String {
-        minutes == 0 ? "Manual only" : "\(minutes) min"
+        minutes == 0 ? L.text("Manual only", "Sadece manuel") : "\(minutes) \(L.text("min", "dk"))"
     }
 
     static func appearanceMode() -> String {
@@ -43,9 +45,22 @@ private enum AppConfig {
 
     static func appearanceTitle(for mode: String) -> String {
         switch mode {
-        case "light": return "Light"
-        case "dark": return "Dark"
-        default: return "Auto"
+        case "light": return L.text("Light", "Açık")
+        case "dark": return L.text("Dark", "Koyu")
+        default: return L.text("Auto", "Otomatik")
+        }
+    }
+
+    static func languageMode() -> String {
+        let saved = UserDefaults.standard.string(forKey: languageKey) ?? "auto"
+        return languageOptions.contains(saved) ? saved : "auto"
+    }
+
+    static func languageTitle(for mode: String) -> String {
+        switch mode {
+        case "en": return "English"
+        case "tr": return "Türkçe"
+        default: return L.text("System", "Sistem")
         }
     }
 
@@ -53,6 +68,22 @@ private enum AppConfig {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         let withScheme = trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") ? trimmed : "https://\(trimmed)"
         return withScheme.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+}
+
+private enum L {
+    static var isTurkish: Bool {
+        switch AppConfig.languageMode() {
+        case "tr": return true
+        case "en": return false
+        default:
+            let preferred = Locale.preferredLanguages.first ?? Locale.current.identifier
+            return preferred.lowercased().hasPrefix("tr")
+        }
+    }
+
+    static func text(_ en: String, _ tr: String) -> String {
+        isTurkish ? tr : en
     }
 }
 
@@ -205,11 +236,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func showContextMenu(from button: NSStatusBarButton) {
         let menu = NSMenu()
-        menu.addItem(withTitle: "Refresh", action: #selector(refresh), keyEquivalent: "r")
-        menu.addItem(withTitle: "Open Panel", action: #selector(openPanel), keyEquivalent: "o")
-        menu.addItem(withTitle: "Settings", action: #selector(showSettings), keyEquivalent: ",")
+        menu.addItem(withTitle: L.text("Refresh", "Yenile"), action: #selector(refresh), keyEquivalent: "r")
+        menu.addItem(withTitle: L.text("Open Panel", "Paneli Aç"), action: #selector(openPanel), keyEquivalent: "o")
+        menu.addItem(withTitle: L.text("Settings", "Ayarlar"), action: #selector(showSettings), keyEquivalent: ",")
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Quit", action: #selector(quit), keyEquivalent: "q")
+        menu.addItem(withTitle: L.text("Quit", "Çık"), action: #selector(quit), keyEquivalent: "q")
         menu.items.forEach { $0.target = self }
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
     }
@@ -329,7 +360,7 @@ final class QuotaViewController: NSViewController {
         title.font = .systemFont(ofSize: 15, weight: .bold)
         title.textColor = Theme.primaryText
 
-        subtitleLabel = NSTextField(labelWithString: "Codex quota")
+        subtitleLabel = NSTextField(labelWithString: L.text("Codex quota", "Codex kota"))
         subtitleLabel.font = .systemFont(ofSize: 10, weight: .medium)
         subtitleLabel.textColor = Theme.secondaryText
         subtitleLabel.lineBreakMode = .byTruncatingMiddle
@@ -374,13 +405,13 @@ final class QuotaViewController: NSViewController {
         footerTitle.textColor = Theme.secondaryText
         footerTitle.translatesAutoresizingMaskIntoConstraints = false
 
-        lastRefreshLabel = NSTextField(labelWithString: "Son Güncelleme: yok")
+        lastRefreshLabel = NSTextField(labelWithString: L.text("Last refresh: never", "Son güncelleme: yok"))
         lastRefreshLabel.font = .monospacedDigitSystemFont(ofSize: 9, weight: .semibold)
         lastRefreshLabel.textColor = Theme.mutedText
         lastRefreshLabel.alignment = .right
         lastRefreshLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        usageLabel = NSTextField(labelWithString: "Today -- · Week -- · Month --")
+        usageLabel = NSTextField(labelWithString: usageLineText(nil))
         usageLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .semibold)
         usageLabel.textColor = Theme.primaryText
         usageLabel.lineBreakMode = .byTruncatingTail
@@ -388,7 +419,7 @@ final class QuotaViewController: NSViewController {
         usageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         copyButton = footerIconButton("doc.on.doc", action: #selector(copyUsageTable))
-        copyButton.toolTip = "Copy ccusage summary"
+        copyButton.toolTip = L.text("Copy ccusage summary", "ccusage özetini kopyala")
 
         footer.addSubview(footerTitle)
         footer.addSubview(lastRefreshLabel)
@@ -468,10 +499,10 @@ final class QuotaViewController: NSViewController {
             return
         }
         isRefreshing = true
-        lastRefreshLabel.stringValue = "Yenileniyor..."
+        lastRefreshLabel.stringValue = L.text("Refreshing...", "Yenileniyor...")
         refreshLocalUsage()
         refreshButton.isEnabled = false
-        subtitleLabel.stringValue = "Refreshing..."
+        subtitleLabel.stringValue = L.text("Refreshing...", "Yenileniyor...")
 
         api.fetchQuota { [weak self] result in
             DispatchQueue.main.async {
@@ -505,11 +536,11 @@ final class QuotaViewController: NSViewController {
         NSPasteboard.general.setString(usageTableText(), forType: .string)
         copyButton.image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: nil)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10.8, weight: .regular))
-        copyButton.toolTip = "Copied"
+        copyButton.toolTip = L.text("Copied", "Kopyalandı")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
             self?.copyButton.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)?
                 .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10.8, weight: .regular))
-            self?.copyButton.toolTip = "Copy ccusage summary"
+            self?.copyButton.toolTip = L.text("Copy ccusage summary", "ccusage özetini kopyala")
         }
     }
 
@@ -525,10 +556,11 @@ final class QuotaViewController: NSViewController {
         let keyField = NSSecureTextField(string: UserDefaults.standard.string(forKey: AppConfig.defaultsKey) ?? "")
         let autoRefreshPopup = NSPopUpButton(frame: .zero, pullsDown: false)
         let appearancePopup = NSPopUpButton(frame: .zero, pullsDown: false)
-        let launchAtLogin = NSButton(checkboxWithTitle: "Launch at Login", target: nil, action: nil)
+        let languagePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        let launchAtLogin = NSButton(checkboxWithTitle: L.text("Launch at Login", "Girişte aç"), target: nil, action: nil)
         launchAtLogin.state = SMAppService.mainApp.status == .enabled ? .on : .off
         baseField.placeholderString = "https://ai.example.com"
-        keyField.placeholderString = "Management key"
+        keyField.placeholderString = L.text("Management key", "Management key")
         for minutes in AppConfig.autoRefreshOptions {
             autoRefreshPopup.addItem(withTitle: AppConfig.autoRefreshTitle(for: minutes))
             autoRefreshPopup.lastItem?.representedObject = minutes
@@ -541,21 +573,29 @@ final class QuotaViewController: NSViewController {
         appearancePopup.selectItem(withTitle: AppConfig.appearanceTitle(for: AppConfig.appearanceMode()))
         appearancePopup.target = self
         appearancePopup.action = #selector(settingsAppearanceChanged(_:))
+        for mode in AppConfig.languageOptions {
+            languagePopup.addItem(withTitle: AppConfig.languageTitle(for: mode))
+            languagePopup.lastItem?.representedObject = mode
+        }
+        languagePopup.selectItem(withTitle: AppConfig.languageTitle(for: AppConfig.languageMode()))
 
-        let settingsView = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 186))
+        let settingsView = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 214))
         settingsView.appearance = Theme.appAppearance
         let baseLabel = NSTextField(labelWithString: "Base URL")
-        let keyLabel = NSTextField(labelWithString: "Management key")
-        let autoRefreshLabel = NSTextField(labelWithString: "Auto refresh")
-        let appearanceLabel = NSTextField(labelWithString: "Appearance")
-        baseLabel.frame = NSRect(x: 0, y: 162, width: 340, height: 18)
-        baseField.frame = NSRect(x: 0, y: 134, width: 340, height: 24)
-        keyLabel.frame = NSRect(x: 0, y: 108, width: 340, height: 18)
-        keyField.frame = NSRect(x: 0, y: 80, width: 340, height: 24)
-        autoRefreshLabel.frame = NSRect(x: 0, y: 52, width: 150, height: 22)
-        autoRefreshPopup.frame = NSRect(x: 156, y: 50, width: 184, height: 26)
-        appearanceLabel.frame = NSRect(x: 0, y: 24, width: 150, height: 22)
-        appearancePopup.frame = NSRect(x: 156, y: 22, width: 184, height: 26)
+        let keyLabel = NSTextField(labelWithString: L.text("Management key", "Management key"))
+        let autoRefreshLabel = NSTextField(labelWithString: L.text("Auto refresh", "Otomatik yenile"))
+        let appearanceLabel = NSTextField(labelWithString: L.text("Appearance", "Görünüm"))
+        let languageLabel = NSTextField(labelWithString: L.text("Language", "Dil"))
+        baseLabel.frame = NSRect(x: 0, y: 190, width: 340, height: 18)
+        baseField.frame = NSRect(x: 0, y: 162, width: 340, height: 24)
+        keyLabel.frame = NSRect(x: 0, y: 136, width: 340, height: 18)
+        keyField.frame = NSRect(x: 0, y: 108, width: 340, height: 24)
+        autoRefreshLabel.frame = NSRect(x: 0, y: 80, width: 150, height: 22)
+        autoRefreshPopup.frame = NSRect(x: 156, y: 78, width: 184, height: 26)
+        appearanceLabel.frame = NSRect(x: 0, y: 52, width: 150, height: 22)
+        appearancePopup.frame = NSRect(x: 156, y: 50, width: 184, height: 26)
+        languageLabel.frame = NSRect(x: 0, y: 24, width: 150, height: 22)
+        languagePopup.frame = NSRect(x: 156, y: 22, width: 184, height: 26)
         launchAtLogin.frame = NSRect(x: 0, y: -4, width: 340, height: 22)
         settingsView.addSubview(baseLabel)
         settingsView.addSubview(baseField)
@@ -565,16 +605,18 @@ final class QuotaViewController: NSViewController {
         settingsView.addSubview(autoRefreshPopup)
         settingsView.addSubview(appearanceLabel)
         settingsView.addSubview(appearancePopup)
+        settingsView.addSubview(languageLabel)
+        settingsView.addSubview(languagePopup)
         settingsView.addSubview(launchAtLogin)
 
         let alert = NSAlert()
-        alert.messageText = isInitialSetup ? "GrandeBar Setup" : "GrandeBar Settings"
+        alert.messageText = isInitialSetup ? L.text("GrandeBar Setup", "GrandeBar Kurulum") : L.text("GrandeBar Settings", "GrandeBar Ayarlar")
         alert.informativeText = isInitialSetup
-            ? "CLIProxyAPI Management Center URL ve management key gir."
-            : "Panel adresi ve management key burada saklanır."
+            ? L.text("Enter the CLIProxyAPI Management Center URL and management key.", "CLIProxyAPI Management Center URL ve management key gir.")
+            : L.text("Panel URL and management key are stored here.", "Panel adresi ve management key burada saklanır.")
         alert.accessoryView = settingsView
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: L.text("Save", "Kaydet"))
+        alert.addButton(withTitle: L.text("Cancel", "İptal"))
         alert.window.appearance = Theme.appAppearance
 
         NSApp.activate(ignoringOtherApps: true)
@@ -584,6 +626,7 @@ final class QuotaViewController: NSViewController {
             UserDefaults.standard.set(managementKey, forKey: AppConfig.defaultsKey)
             UserDefaults.standard.set(autoRefreshPopup.selectedItem?.representedObject as? Int ?? 0, forKey: AppConfig.autoRefreshMinutesKey)
             UserDefaults.standard.set(appearancePopup.selectedItem?.representedObject as? String ?? "auto", forKey: AppConfig.appearanceKey)
+            UserDefaults.standard.set(languagePopup.selectedItem?.representedObject as? String ?? "auto", forKey: AppConfig.languageKey)
             UserDefaults.standard.synchronize()
             reloadViewForAppearance()
             updateAutoRefreshTimer()
@@ -608,7 +651,7 @@ final class QuotaViewController: NSViewController {
         loadView()
         latestUsage = usage
         if let usage {
-            usageLabel.stringValue = "Today \(LocalCodexUsage.format(usage.today)) · Week \(LocalCodexUsage.format(usage.week)) · Month \(LocalCodexUsage.format(usage.month))"
+            usageLabel.stringValue = usageLineText(usage)
         }
         if !cards.isEmpty {
             render(cards: cards)
@@ -628,7 +671,7 @@ final class QuotaViewController: NSViewController {
             }
         } catch {
             let alert = NSAlert(error: error)
-            alert.messageText = "Launch at Login kaydedilemedi"
+            alert.messageText = L.text("Launch at Login could not be saved", "Girişte aç ayarı kaydedilemedi")
             alert.runModal()
         }
     }
@@ -639,10 +682,10 @@ final class QuotaViewController: NSViewController {
             DispatchQueue.main.async {
                 if let usage {
                     self.latestUsage = usage
-                    self.usageLabel.stringValue = "Today \(LocalCodexUsage.format(usage.today)) · Week \(LocalCodexUsage.format(usage.week)) · Month \(LocalCodexUsage.format(usage.month))"
+                    self.usageLabel.stringValue = self.usageLineText(usage)
                 } else {
                     self.latestUsage = nil
-                    self.usageLabel.stringValue = "ccusage okunamadı"
+                    self.usageLabel.stringValue = L.text("ccusage unavailable", "ccusage okunamadı")
                 }
             }
         }
@@ -650,7 +693,7 @@ final class QuotaViewController: NSViewController {
 
     private func renderIdle() {
         clearCards()
-        let label = NSTextField(labelWithString: "Refresh'e bas")
+        let label = NSTextField(labelWithString: L.text("Press Refresh", "Yenile'ye bas"))
         label.font = .systemFont(ofSize: 14, weight: .medium)
         label.textColor = Theme.secondaryText
         stackView.addArrangedSubview(label)
@@ -680,14 +723,14 @@ final class QuotaViewController: NSViewController {
 
     private func updateLastRefreshLabel() {
         guard let lastRefreshAt else {
-            lastRefreshLabel.stringValue = "Son Güncelleme: yok"
+            lastRefreshLabel.stringValue = L.text("Last refresh: never", "Son güncelleme: yok")
             return
         }
         let seconds = max(0, Int(Date().timeIntervalSince(lastRefreshAt)))
         if seconds < 60 {
-            lastRefreshLabel.stringValue = "Son Güncelleme: \(seconds) sn"
+            lastRefreshLabel.stringValue = L.text("Last refresh: \(seconds)s", "Son güncelleme: \(seconds) sn")
         } else {
-            lastRefreshLabel.stringValue = "Son Güncelleme: \(seconds / 60) dk \(seconds % 60) sn"
+            lastRefreshLabel.stringValue = L.text("Last refresh: \(seconds / 60)m \(seconds % 60)s", "Son güncelleme: \(seconds / 60) dk \(seconds % 60) sn")
         }
     }
 
@@ -695,7 +738,7 @@ final class QuotaViewController: NSViewController {
         clearCards()
 
         if cards.isEmpty {
-            renderError("No Codex credentials found")
+            renderError(L.text("No Codex credentials found", "Codex hesabı bulunamadı"))
             return
         }
 
@@ -722,7 +765,7 @@ final class QuotaViewController: NSViewController {
 
     private func renderError(_ message: String) {
         clearCards()
-        subtitleLabel.stringValue = "Could not load quota"
+        subtitleLabel.stringValue = L.text("Could not load quota", "Kota yüklenemedi")
         statusUpdate(message.contains("IP banned") ? "ban" : "err", message)
 
         let box = RoundedView(color: Theme.errorBackground, radius: 16, borderColor: Theme.border)
@@ -789,7 +832,7 @@ final class QuotaViewController: NSViewController {
 
     private func summaryText(for cards: [QuotaCard]) -> String {
         let resetTotal = cards.compactMap(\.resetCreditsAvailableCount).reduce(0, +)
-        return "\(cards.count) account · \(resetTotal) reset"
+        return L.text("\(cards.count) account · \(resetTotal) reset", "\(cards.count) hesap · \(resetTotal) reset")
     }
 
     private func earliestResetExpiry(in cards: [QuotaCard]) -> (name: String, date: Date)? {
@@ -806,8 +849,8 @@ final class QuotaViewController: NSViewController {
 
     private func formatExpiry(_ date: Date) -> String {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "tr_TR")
-        formatter.dateFormat = "d MMM HH:mm"
+        formatter.locale = Locale(identifier: L.isTurkish ? "tr_TR" : "en_US_POSIX")
+        formatter.dateFormat = L.isTurkish ? "d MMM HH:mm" : "MMM d HH:mm"
         return formatter.string(from: date)
     }
 
@@ -832,26 +875,42 @@ final class QuotaViewController: NSViewController {
     }
 
     private func usageTableText() -> String {
-        var usageLine = "ccusage okunamadı."
+        var usageLine = L.text("ccusage unavailable.", "ccusage okunamadı.")
         if let usage = latestUsage {
-            usageLine = "Token cost: today \(LocalCodexUsage.format(usage.today)), this week \(LocalCodexUsage.format(usage.week)), month to date \(LocalCodexUsage.format(usage.month))."
+            usageLine = L.text(
+                "Token cost: today \(LocalCodexUsage.format(usage.today)), this week \(LocalCodexUsage.format(usage.week)), month to date \(LocalCodexUsage.format(usage.month)).",
+                "Token cost: bugün \(LocalCodexUsage.format(usage.today)), bu hafta \(LocalCodexUsage.format(usage.week)), ay başından beri \(LocalCodexUsage.format(usage.month))."
+            )
         }
 
         guard !latestCards.isEmpty else {
-            return "\(usageLine)\nAccount quota is not loaded yet."
+            return "\(usageLine)\n\(L.text("Account quota is not loaded yet.", "Hesap kotası henüz yüklenmedi."))"
         }
 
         let summary = totalLimitSummary(for: latestCards)
         let weeklyTotal = poolPercentText(remaining: summary.weeklyRemaining, total: summary.weeklyTotal)
         let accounts = latestCards
             .sorted(by: sortCards)
-            .map { "- \(compactAccountName($0.name)): session \(percentText($0.sessionPercent)), weekly \(percentText($0.weeklyPercent))" }
+            .map { "- \(compactAccountName($0.name)): \(L.text("session", "oturum")) \(percentText($0.sessionPercent)), \(L.text("weekly", "haftalık")) \(percentText($0.weeklyPercent))" }
             .joined(separator: "\n")
         let resetTotal = latestCards.compactMap(\.resetCreditsAvailableCount).reduce(0, +)
         let closestReset = earliestResetExpiry(in: latestCards)
             .map { "\(formatExpiry($0.date)) (\(compactAccountName($0.name)))" } ?? "--"
 
-        return "\(usageLine)\nRemaining total: session \(sessionPoolTitle(summary)), weekly \(weeklyTotal). Reset credits: \(resetTotal), nearest expiry: \(closestReset).\nAccount remaining:\n\(accounts)"
+        return L.text(
+            "\(usageLine)\nRemaining total: session \(sessionPoolTitle(summary)), weekly \(weeklyTotal). Reset credits: \(resetTotal), nearest expiry: \(closestReset).\nAccount remaining:\n\(accounts)",
+            "\(usageLine)\nToplam kalan: oturum \(sessionPoolTitle(summary)), haftalık \(weeklyTotal). Reset hakkı: \(resetTotal), en yakın expire: \(closestReset).\nHesaplarda kalan:\n\(accounts)"
+        )
+    }
+
+    private func usageLineText(_ usage: LocalUsage?) -> String {
+        guard let usage else {
+            return L.text("Today -- · Week -- · Month --", "Bugün -- · Hafta -- · Ay --")
+        }
+        return L.text(
+            "Today \(LocalCodexUsage.format(usage.today)) · Week \(LocalCodexUsage.format(usage.week)) · Month \(LocalCodexUsage.format(usage.month))",
+            "Bugün \(LocalCodexUsage.format(usage.today)) · Hafta \(LocalCodexUsage.format(usage.week)) · Ay \(LocalCodexUsage.format(usage.month))"
+        )
     }
 
     private func percentText(_ percent: Int?) -> String {
@@ -930,8 +989,8 @@ private final class AccountCardView: RoundedView {
         resetExpiry.translatesAutoresizingMaskIntoConstraints = false
         resetExpiry.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
 
-        let session = MetricView(title: "Session 5h", percent: card.sessionPercent, resetSeconds: card.sessionResetSeconds)
-        let weekly = MetricView(title: "Weekly", percent: card.weeklyPercent, resetSeconds: card.weeklyResetSeconds)
+        let session = MetricView(title: L.text("Session 5h", "Oturum 5s"), percent: card.sessionPercent, resetSeconds: card.sessionResetSeconds)
+        let weekly = MetricView(title: L.text("Weekly", "Haftalık"), percent: card.weeklyPercent, resetSeconds: card.weeklyResetSeconds)
         session.translatesAutoresizingMaskIntoConstraints = false
         weekly.translatesAutoresizingMaskIntoConstraints = false
 
@@ -993,7 +1052,7 @@ private final class AccountCardView: RoundedView {
 
     private func resetCountText(_ card: QuotaCard) -> String {
         let count = card.resetCreditsAvailableCount.map(String.init) ?? "--"
-        return "Reset \(count) adet"
+        return L.text("Reset \(count)", "Reset \(count) adet")
     }
 
     private func resetExpiryText(_ card: QuotaCard) -> String {
@@ -1006,8 +1065,8 @@ private final class AccountCardView: RoundedView {
 
     private func formatExpiry(_ date: Date) -> String {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "tr_TR")
-        formatter.dateFormat = "d MMM HH:mm"
+        formatter.locale = Locale(identifier: L.isTurkish ? "tr_TR" : "en_US_POSIX")
+        formatter.dateFormat = L.isTurkish ? "d MMM HH:mm" : "MMM d HH:mm"
         return formatter.string(from: date)
     }
 
@@ -1019,8 +1078,8 @@ private final class TotalLimitCardView: RoundedView {
 
         let sessionPercent = percent(remaining: summary.sessionRemaining, total: summary.sessionTotal)
         let weeklyPercent = percent(remaining: summary.weeklyRemaining, total: summary.weeklyTotal)
-        let session = TotalMetricView(title: "Session pool", value: valueText(sessionPercent), detail: "toplam kalan", percent: sessionPercent, tint: color(for: sessionPercent))
-        let weekly = TotalMetricView(title: "Weekly pool", value: valueText(weeklyPercent), detail: "toplam kalan", percent: weeklyPercent, tint: color(for: weeklyPercent))
+        let session = TotalMetricView(title: L.text("Session pool", "Oturum havuzu"), value: valueText(sessionPercent), detail: L.text("total remaining", "toplam kalan"), percent: sessionPercent, tint: color(for: sessionPercent))
+        let weekly = TotalMetricView(title: L.text("Weekly pool", "Haftalık havuz"), value: valueText(weeklyPercent), detail: L.text("total remaining", "toplam kalan"), percent: weeklyPercent, tint: color(for: weeklyPercent))
         let divider = divider()
         session.translatesAutoresizingMaskIntoConstraints = false
         weekly.translatesAutoresizingMaskIntoConstraints = false
@@ -1212,6 +1271,11 @@ private final class MetricView: NSView {
         let days = seconds / 86_400
         let hours = (seconds % 86_400) / 3_600
         let minutes = (seconds % 3_600) / 60
+        if L.isTurkish {
+            if days > 0 { return "\(days)g\(hours)s" }
+            if hours > 0 { return "\(hours)s\(minutes)d" }
+            return "\(max(1, minutes))d"
+        }
         if days > 0 { return "\(days)d\(hours)h" }
         if hours > 0 { return "\(hours)h\(minutes)m" }
         return "\(max(1, minutes))m"
@@ -1368,7 +1432,7 @@ private final class QuotaAPI {
     func fetchQuota(completion: @escaping (Result<[QuotaCard], Error>) -> Void) {
         guard let managementKey = UserDefaults.standard.string(forKey: AppConfig.defaultsKey)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !managementKey.isEmpty else {
-            completion(.failure(NSError(domain: "GrandeBar", code: 1, userInfo: [NSLocalizedDescriptionKey: "Management key is missing"])))
+            completion(.failure(NSError(domain: "GrandeBar", code: 1, userInfo: [NSLocalizedDescriptionKey: L.text("Management key is missing", "Management key eksik")])))
             return
         }
 
@@ -1405,7 +1469,7 @@ private final class QuotaAPI {
 
                 group.notify(queue: .global(qos: .utility)) {
                     if cards.isEmpty {
-                        completion(.failure(firstError ?? NSError(domain: "GrandeBar", code: 2, userInfo: [NSLocalizedDescriptionKey: "No quota data returned"])))
+                        completion(.failure(firstError ?? NSError(domain: "GrandeBar", code: 2, userInfo: [NSLocalizedDescriptionKey: L.text("No quota data returned", "Kota verisi dönmedi")])))
                     } else {
                         completion(.success(cards))
                     }
@@ -1489,7 +1553,7 @@ private final class QuotaAPI {
 
     private func apiJSON(path: String, method: String = "GET", payload: [String: Any]? = nil, managementKey: String, completion: @escaping (Result<[String: Any], Error>) -> Void) {
         guard let url = URL(string: "\(AppConfig.apiBase())/v0/management\(path)") else {
-            completion(.failure(NSError(domain: "GrandeBar", code: 3, userInfo: [NSLocalizedDescriptionKey: "Base URL is invalid"])))
+            completion(.failure(NSError(domain: "GrandeBar", code: 3, userInfo: [NSLocalizedDescriptionKey: L.text("Base URL is invalid", "Base URL geçersiz")])))
             return
         }
         var request = URLRequest(url: url)
