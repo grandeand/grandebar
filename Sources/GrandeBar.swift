@@ -17,6 +17,12 @@ private enum AppConfig {
         return normalizedBase(saved)
     }
 
+    static func hasManagementKey() -> Bool {
+        !(UserDefaults.standard.string(forKey: defaultsKey) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty
+    }
+
     static func managementURL() -> URL {
         URL(string: "\(apiBase())/management.html#/quota")!
     }
@@ -172,6 +178,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.delegate = self
         popover.contentSize = NSSize(width: UI.popoverWidth, height: UI.popoverHeight)
         popover.contentViewController = quotaViewController
+
+        DispatchQueue.main.async { [weak self] in
+            self?.quotaViewController.showSettingsIfNeeded(refreshAfterSave: true)
+        }
     }
 
     @objc private func statusItemClicked() {
@@ -454,6 +464,9 @@ final class QuotaViewController: NSViewController {
     @objc func refreshQuota() {
         loadViewIfNeeded()
         guard !isRefreshing else { return }
+        if showSettingsIfNeeded(refreshAfterSave: true) {
+            return
+        }
         isRefreshing = true
         lastRefreshLabel.stringValue = "Yenileniyor..."
         refreshLocalUsage()
@@ -500,7 +513,14 @@ final class QuotaViewController: NSViewController {
         }
     }
 
-    func showSettings() {
+    @discardableResult
+    func showSettingsIfNeeded(refreshAfterSave: Bool) -> Bool {
+        guard !AppConfig.hasManagementKey() else { return false }
+        showSettings(isInitialSetup: true, refreshAfterSave: refreshAfterSave)
+        return true
+    }
+
+    func showSettings(isInitialSetup: Bool = false, refreshAfterSave: Bool = false) {
         let baseField = NSTextField(string: AppConfig.apiBase())
         let keyField = NSSecureTextField(string: UserDefaults.standard.string(forKey: AppConfig.defaultsKey) ?? "")
         let autoRefreshPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -548,22 +568,29 @@ final class QuotaViewController: NSViewController {
         settingsView.addSubview(launchAtLogin)
 
         let alert = NSAlert()
-        alert.messageText = "GrandeBar Settings"
-        alert.informativeText = "Panel adresi ve management key burada saklanır."
+        alert.messageText = isInitialSetup ? "GrandeBar Setup" : "GrandeBar Settings"
+        alert.informativeText = isInitialSetup
+            ? "CLIProxyAPI Management Center URL ve management key gir."
+            : "Panel adresi ve management key burada saklanır."
         alert.accessoryView = settingsView
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
         alert.window.appearance = Theme.appAppearance
 
+        NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn {
+            let managementKey = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             UserDefaults.standard.set(AppConfig.normalizedBase(baseField.stringValue), forKey: AppConfig.apiBaseKey)
-            UserDefaults.standard.set(keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: AppConfig.defaultsKey)
+            UserDefaults.standard.set(managementKey, forKey: AppConfig.defaultsKey)
             UserDefaults.standard.set(autoRefreshPopup.selectedItem?.representedObject as? Int ?? 0, forKey: AppConfig.autoRefreshMinutesKey)
             UserDefaults.standard.set(appearancePopup.selectedItem?.representedObject as? String ?? "auto", forKey: AppConfig.appearanceKey)
             UserDefaults.standard.synchronize()
             reloadViewForAppearance()
             updateAutoRefreshTimer()
             setLaunchAtLogin(launchAtLogin.state == .on)
+            if refreshAfterSave && !managementKey.isEmpty {
+                refreshQuota()
+            }
         }
     }
 

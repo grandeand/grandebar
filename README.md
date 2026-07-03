@@ -94,6 +94,8 @@ open dist/GrandeBar.app
 
 5. Configure GrandeBar.
 
+On first launch, GrandeBar asks for the Management Center URL and management key. You can change them later from Settings.
+
 Right-click the menu bar icon, open `Settings`, then set:
 
 - `Base URL`: your CLIProxyAPI Management Center origin, for example `http://localhost:8317`.
