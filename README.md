@@ -35,6 +35,14 @@ GrandeBar looks for `ccusage` in:
 - `/usr/local/bin/ccusage`
 - the app process `PATH`
 
+## Install with Homebrew
+
+```bash
+brew install --cask grandeand/tap/grandebar
+```
+
+The current release is unsigned. Homebrew can install it, but macOS may warn on first launch because the app is not signed and notarized yet. If that happens, open it once from Finder with right click, then `Open`.
+
 ## Setup
 
 1. Install and run CLIProxyAPI.
