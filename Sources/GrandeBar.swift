@@ -193,7 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         icon?.isTemplate = true
         statusItem.button?.image = icon
         statusItem.button?.imagePosition = .imageLeading
-        setStatusTitle("--%")
+        setStatusTitle("S --%\nW --%")
         statusItem.button?.toolTip = "GrandeBar"
         statusItem.button?.target = self
         statusItem.button?.action = #selector(statusItemClicked)
@@ -295,10 +295,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func setStatusTitle(_ title: String) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.minimumLineHeight = 9
+        paragraph.maximumLineHeight = 9
+        paragraph.lineBreakMode = .byClipping
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold),
+            .font: NSFont.monospacedDigitSystemFont(ofSize: title.contains("\n") ? 8.5 : 13, weight: .semibold),
             .foregroundColor: NSColor.labelColor,
-            .baselineOffset: -1
+            .paragraphStyle: paragraph,
+            .baselineOffset: title.contains("\n") ? 0 : -1
         ]
         statusItem.button?.attributedTitle = NSAttributedString(string: title, attributes: attributes)
     }
@@ -745,7 +750,7 @@ final class QuotaViewController: NSViewController {
         subtitleLabel.stringValue = summaryText(for: cards)
         latestCards = cards
         let summary = totalLimitSummary(for: cards)
-        let title = sessionPoolTitle(summary)
+        let title = menuBarPoolTitle(summary)
         let tooltip = cards.map { "\($0.name): \($0.sessionPercent.map(String.init) ?? "--")% session, \($0.weeklyPercent.map(String.init) ?? "--")% weekly" }.joined(separator: "\n")
         statusUpdate(title, tooltip)
 
@@ -872,6 +877,10 @@ final class QuotaViewController: NSViewController {
             return "--%"
         }
         return "\(Int((Double(remaining) / Double(total) * 100).rounded()))%"
+    }
+
+    private func menuBarPoolTitle(_ summary: TotalLimitSummary) -> String {
+        "S \(sessionPoolTitle(summary))\nW \(poolPercentText(remaining: summary.weeklyRemaining, total: summary.weeklyTotal))"
     }
 
     private func usageTableText() -> String {
