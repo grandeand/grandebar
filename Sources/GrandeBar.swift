@@ -193,7 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         icon?.isTemplate = true
         statusItem.button?.image = icon
         statusItem.button?.imagePosition = .imageLeading
-        setStatusTitle("S --%\nW --%")
+        setStatusTitle(" --%\n --%")
         statusItem.button?.toolTip = "GrandeBar"
         statusItem.button?.target = self
         statusItem.button?.action = #selector(statusItemClicked)
@@ -296,14 +296,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func setStatusTitle(_ title: String) {
         let paragraph = NSMutableParagraphStyle()
-        paragraph.minimumLineHeight = 9
-        paragraph.maximumLineHeight = 9
+        paragraph.alignment = .right
+        paragraph.minimumLineHeight = 10
+        paragraph.maximumLineHeight = 10
         paragraph.lineBreakMode = .byClipping
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: title.contains("\n") ? 8.5 : 13, weight: .semibold),
+            .font: NSFont.monospacedDigitSystemFont(ofSize: title.contains("\n") ? 10.2 : 13, weight: .semibold),
             .foregroundColor: NSColor.labelColor,
             .paragraphStyle: paragraph,
-            .baselineOffset: title.contains("\n") ? 0 : -1
+            .baselineOffset: title.contains("\n") ? -4 : -1
         ]
         statusItem.button?.attributedTitle = NSAttributedString(string: title, attributes: attributes)
     }
@@ -860,7 +861,10 @@ final class QuotaViewController: NSViewController {
     }
 
     private func totalLimitSummary(for cards: [QuotaCard]) -> TotalLimitSummary {
-        let sessions = cards.compactMap(\.sessionPercent)
+        let sessions = cards.compactMap { card -> Int? in
+            guard let session = card.sessionPercent else { return nil }
+            return card.weeklyPercent == 0 ? 0 : session
+        }
         let weeklies = cards.compactMap(\.weeklyPercent)
         return TotalLimitSummary(
             sessionRemaining: sessions.isEmpty ? nil : sessions.reduce(0, +),
@@ -880,7 +884,11 @@ final class QuotaViewController: NSViewController {
     }
 
     private func menuBarPoolTitle(_ summary: TotalLimitSummary) -> String {
-        "S \(sessionPoolTitle(summary))\nW \(poolPercentText(remaining: summary.weeklyRemaining, total: summary.weeklyTotal))"
+        "\(paddedMenuBarPercent(sessionPoolTitle(summary)))\n\(paddedMenuBarPercent(poolPercentText(remaining: summary.weeklyRemaining, total: summary.weeklyTotal)))"
+    }
+
+    private func paddedMenuBarPercent(_ value: String) -> String {
+        String(repeating: " ", count: max(0, 4 - value.count)) + value
     }
 
     private func usageTableText() -> String {
