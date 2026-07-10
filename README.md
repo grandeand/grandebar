@@ -82,7 +82,7 @@ GrandeBar expects the panel and API to be available under the same origin:
 Use the install method from the `ccusage` repository, then verify that this command works in your terminal:
 
 ```bash
-ccusage codex daily --json --offline
+ccusage codex daily --json
 ```
 
 4. Build the app.
@@ -107,7 +107,7 @@ Right-click the menu bar icon, open `Settings`, then set:
 
 ## How It Works
 
-GrandeBar asks the management API for active auth files, then uses the management API proxy endpoint to request Codex quota data for each account. It reads local token cost separately through `ccusage` in offline mode.
+GrandeBar asks the management API for active auth files, then uses the management API proxy endpoint to request Codex quota data for each account. It reads local token cost separately through `ccusage`.
 
 No management key is stored in the app bundle. The key is saved in macOS user defaults for the current user.
 

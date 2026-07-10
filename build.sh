@@ -2,9 +2,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-APP="$ROOT/dist/GrandeBar.app"
+OUTPUT="$ROOT/dist/GrandeBar.app"
+BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/grandebar.XXXXXX")"
+APP="$BUILD_DIR/GrandeBar.app"
+trap 'rm -rf "$BUILD_DIR"' EXIT
 
-rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
@@ -17,4 +19,11 @@ swiftc \
   -framework ServiceManagement \
   -o "$APP/Contents/MacOS/GrandeBar"
 
-echo "$APP"
+xattr -cr "$APP"
+codesign --force --sign - "$APP"
+
+rm -rf "$OUTPUT"
+mkdir -p "$ROOT/dist"
+ditto "$APP" "$OUTPUT"
+
+echo "$OUTPUT"

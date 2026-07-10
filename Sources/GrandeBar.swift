@@ -162,6 +162,7 @@ private struct LocalUsage {
     let today: Double
     let week: Double
     let month: Double
+    let models: [String]
 }
 
 private struct ResetCreditsInfo {
@@ -924,9 +925,10 @@ final class QuotaViewController: NSViewController {
         guard let usage else {
             return L.text("Today -- · Week -- · Month --", "Bugün -- · Hafta -- · Ay --")
         }
+        let modelText = usage.models.isEmpty ? "" : " · \(usage.models.joined(separator: ", "))"
         return L.text(
-            "Today \(LocalCodexUsage.format(usage.today)) · Week \(LocalCodexUsage.format(usage.week)) · Month \(LocalCodexUsage.format(usage.month))",
-            "Bugün \(LocalCodexUsage.format(usage.today)) · Hafta \(LocalCodexUsage.format(usage.week)) · Ay \(LocalCodexUsage.format(usage.month))"
+            "Today \(LocalCodexUsage.format(usage.today)) · Week \(LocalCodexUsage.format(usage.week)) · Month \(LocalCodexUsage.format(usage.month))\(modelText)",
+            "Bugün \(LocalCodexUsage.format(usage.today)) · Hafta \(LocalCodexUsage.format(usage.week)) · Ay \(LocalCodexUsage.format(usage.month))\(modelText)"
         )
     }
 
@@ -1362,6 +1364,7 @@ private enum LocalCodexUsage {
         var today = 0.0
         var week = 0.0
         var month = 0.0
+        var models = Set<String>()
 
         for row in rows {
             guard let date = row["date"] as? String,
@@ -1369,9 +1372,14 @@ private enum LocalCodexUsage {
             if date == dates.today { today += cost }
             if date >= dates.weekStart { week += cost }
             if date >= dates.monthStart { month += cost }
+            if date >= dates.weekStart {
+                for model in modelNames(from: row) {
+                    models.insert(model)
+                }
+            }
         }
 
-        return LocalUsage(today: today, week: week, month: month)
+        return LocalUsage(today: today, week: week, month: month, models: models.sorted())
     }
 
     static func format(_ amount: Double) -> String {
@@ -1383,7 +1391,7 @@ private enum LocalCodexUsage {
         let process = Process()
         let output = Pipe()
         process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = ["codex", "daily", "--json", "--timezone", TimeZone.current.identifier, "--since", since, "--offline"]
+        process.arguments = ["codex", "daily", "--json", "--timezone", TimeZone.current.identifier, "--since", since]
         var environment = ProcessInfo.processInfo.environment
         let extraPath = "\(FileManager.default.homeDirectoryForCurrentUser.path)/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         environment["PATH"] = "\(extraPath):\(environment["PATH"] ?? "")"
@@ -1442,6 +1450,19 @@ private enum LocalCodexUsage {
         if let number = value as? NSNumber { return number.doubleValue }
         if let string = value as? String { return Double(string) }
         return nil
+    }
+
+    private static func modelNames(from row: [String: Any]) -> [String] {
+        guard let models = row["models"] as? [String: Any] else { return [] }
+        return models.keys.map(normalizedModelName)
+    }
+
+    private static func normalizedModelName(_ model: String) -> String {
+        let lowercased = model.lowercased()
+        if lowercased.hasPrefix("gpt-5.6") { return "GPT-5.6" }
+        if lowercased.hasPrefix("gpt-5.5") { return "GPT-5.5" }
+        if lowercased.hasPrefix("gpt-5.4") { return "GPT-5.4" }
+        return model.uppercased()
     }
 }
 
