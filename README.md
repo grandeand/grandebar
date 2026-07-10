@@ -19,6 +19,8 @@ The app sits in your macOS menu bar, shows the combined session pool percentage,
 - Auto refresh: manual, 5, 10, 15, 30, or 60 minutes.
 - Local token cost from `ccusage`.
 - Copyable English summary with token cost, total remaining quota, reset credits, and per-account remaining quota.
+- **Session warm**: flame button opens cold 5-hour windows on eligible accounts with one tiny Codex request each (skips locked / already-open).
+- Header status lines: `N account · R reset` plus `locked · open · new` detail under the title.
 
 ## Requirements
 
@@ -116,6 +118,21 @@ No management key is stored in the app bundle. The key is saved in macOS user de
 - Do not expose your CLIProxyAPI management endpoint publicly without proper protection.
 - Treat the management key like a secret.
 - GrandeBar does not include, publish, or bundle any account token.
+
+## Session window warmup (multi-account)
+
+Codex 5-hour limits start on first real usage per account. If your CLIProxyAPI pool only hits one account at work start, other accounts stay cold.
+
+**In the app:** click the flame toolbar button next to refresh. Cold accounts get a minimal request; locked and already-open accounts are skipped. Status appears under the title (`N locked · M open · K new`). Hover the flame for a per-account report.
+
+**CLI (optional):**
+
+```bash
+python3 scripts/session_warmup.py --dry-run
+python3 scripts/session_warmup.py --yes
+```
+
+Details: [docs/session-warmup.md](docs/session-warmup.md).
 
 ## Development
 
