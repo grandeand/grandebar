@@ -47,18 +47,20 @@ Unsupported (400): `max_output_tokens` on this Codex path.
 
 ## Skip rules (default)
 
-Warm is **not** a re-align of already-open windows (that only burns quota).
+Warm is **not** a re-align of windows whose **5h countdown is already ticking**.
+
+`used_percent` alone is **not** trusted. Accounts can show `used=1%` while `reset_after_seconds` is still stuck at **18000** (full 5h) — those still need a warm request.
 
 | Condition | Action |
 |-----------|--------|
 | `disabled` | skip |
 | `allowed=false` / credits depleted | skip |
 | `limit_reached` | skip (unless `--force`) |
-| `session used% > --idle-max-used` (default 0) | skip as “already open” |
-| `--force` | ignore open/limit skips carefully |
+| 5h timer has counted down ≥ **120s** off the full window | skip (“timer already running”) |
+| Timer missing / still ~full 5h | **warm** (even if used% > 0) |
+| `--force` | ignore timer skip |
 
-Default `idle-max-used=0` means only accounts at **0% used** are warmed.  
-If you want “almost idle” accounts too: `--idle-max-used 1`.
+After a successful warm, watch `reset_after_seconds` drop below 18000 over the next minutes — that is the real “window is live” signal.
 
 ## GrandeBar UI
 

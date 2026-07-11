@@ -973,22 +973,22 @@ final class QuotaViewController: NSViewController {
     }
 
     /// Secondary header line under the classic summary.
-    /// Examples: `3 locked · 3 open · 0 new`  |  `3 locked · 3 open · 2 new`  |  `… · warming…`
+    /// Examples: `3 locked · 3 open · 0 new`  |  `… · warming…`
     ///
-    /// - locked: allowed=false / limit_reached (credits etc.)
-    /// - open: not locked and session window already started (remaining < 100%)
-    /// - new: last warm-run opened count (0 until a warm runs; then stays including 0)
+    /// - locked: allowed=false / limit_reached
+    /// - open: not locked AND 5h countdown has actually moved (≥2m off full 5h)
+    /// - new: last warm-run opened count (always shown, including 0)
     private func detailText(for cards: [QuotaCard], warming: Bool = false) -> String? {
         guard !cards.isEmpty else { return nil }
 
         let locked = cards.filter(\.isLocked).count
-        // sessionPercent is remaining; window is "open" once any usage has been billed.
+        // Timer progress, not used%: full 5h00m remaining is NOT open yet.
         let open = cards.filter { card in
             guard !card.isLocked else { return false }
-            guard let remaining = card.sessionPercent else { return false }
-            return remaining < 100
+            guard let reset = card.sessionResetSeconds else { return false }
+            let elapsed = max(0, 18_000 - reset)
+            return elapsed >= 120
         }.count
-        // Always show new (including 0) so the line is complete; 0 ≠ hidden.
         let newCount = lastWarmNewCount ?? 0
 
         var parts: [String] = [
@@ -1651,8 +1651,10 @@ private struct SessionWarmupSummary {
 /// Opens cold Codex 5-hour session windows with one minimal Responses request per eligible account.
 private final class SessionWarmupAPI {
     private let model = "gpt-5.4-mini"
-    /// Only warm when session used_percent is at or below this (0 = fully cold).
-    private let idleMaxUsedPercent = 0
+    /// Primary session window length (5h). used% alone is not enough — timer must actually tick.
+    private let sessionWindowSeconds = 18_000
+    /// Skip warm only after countdown has moved this many seconds off the full 5h.
+    private let progressThresholdSeconds = 120
     private let responsesURL = "https://chatgpt.com/backend-api/codex/responses"
     private let usageURL = "https://chatgpt.com/backend-api/wham/usage"
 
@@ -1751,7 +1753,20 @@ private final class SessionWarmupAPI {
         let allowed: Bool?
         let limitReached: Bool?
         let usedPercent: Int?
+        let sessionResetSeconds: Int?
         let limitType: String?
+
+        /// Seconds already elapsed in the 5h window (nil if reset unknown).
+        var elapsedSeconds: Int? {
+            guard let reset = sessionResetSeconds else { return nil }
+            return max(0, 18_000 - reset)
+        }
+
+        /// Timer has actually counted down — not just a stuck "5h00m" label with used=1%.
+        func isProgressing(threshold: Int) -> Bool {
+            guard let elapsed = elapsedSeconds else { return false }
+            return elapsed >= threshold
+        }
     }
 
     private func skipReason(usage: UsageProbe) -> String? {
@@ -1768,10 +1783,13 @@ private final class SessionWarmupAPI {
         if usage.limitReached == true {
             return L.text("limit reached", "limit dolu")
         }
-        if let used = usage.usedPercent, used > idleMaxUsedPercent {
+        // Gate on countdown progress, not used%. Full 5h remaining → still needs warm.
+        if usage.isProgressing(threshold: progressThresholdSeconds) {
+            let mins = (usage.elapsedSeconds ?? 0) / 60
+            let used = usage.usedPercent.map { "\($0)%" } ?? "--"
             return L.text(
-                "already open (used \(used)%)",
-                "zaten açık (kullanım \(used)%)"
+                "timer running (~\(mins)m in, used \(used))",
+                "sayaç işliyor (~\(mins)dk geçmiş, kullanım \(used))"
             )
         }
         return nil
@@ -1813,6 +1831,7 @@ private final class SessionWarmupAPI {
                     allowed: lim["allowed"] as? Bool,
                     limitReached: (lim["limit_reached"] as? Bool) ?? (lim["limitReached"] as? Bool),
                     usedPercent: self.intValue(pw["used_percent"] ?? pw["usedPercent"]),
+                    sessionResetSeconds: self.intValue(pw["reset_after_seconds"] ?? pw["resetAfterSeconds"]),
                     limitType: limitType
                 )))
             }

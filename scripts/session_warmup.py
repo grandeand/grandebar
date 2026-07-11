@@ -32,8 +32,13 @@ from typing import Any
 
 
 DEFAULT_MODEL = "gpt-5.4-mini"
-DEFAULT_IDLE_MAX_USED = 0  # warm only if session used_percent <= this (unless --force)
+DEFAULT_IDLE_MAX_USED = 0  # legacy CLI flag; timer progress is the real gate
 DEFAULT_CONCURRENCY = 1
+# Session primary window length (5h). A window is "progressing" only after the
+# countdown has moved this many seconds off the full window — used% alone lies
+# when API shows used=1% but reset still stuck at 18000.
+SESSION_WINDOW_SECONDS = 18_000
+PROGRESS_THRESHOLD_SECONDS = 120
 USER_AGENT = "GrandeBar-Warmup/0.1"
 CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
 USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
@@ -342,6 +347,24 @@ def send_warmup(
     return status, body_str, elapsed, tokens
 
 
+def session_elapsed_seconds(usage: UsageSnapshot) -> int | None:
+    """How far into the 5h window the countdown has moved (None if unknown)."""
+    if usage.session_reset is None:
+        return None
+    return max(0, SESSION_WINDOW_SECONDS - int(usage.session_reset))
+
+
+def is_session_progressing(usage: UsageSnapshot, threshold: int = PROGRESS_THRESHOLD_SECONDS) -> bool:
+    """True only if the 5h timer has actually counted down past `threshold` seconds.
+
+    used_percent can be 1% while reset is still stuck at 18000 — that is NOT open.
+    """
+    elapsed = session_elapsed_seconds(usage)
+    if elapsed is None:
+        return False
+    return elapsed >= threshold
+
+
 def skip_reason(
     account: AuthAccount,
     usage: UsageSnapshot,
@@ -356,14 +379,18 @@ def skip_reason(
         return f"not allowed ({detail})"
     if usage.limit_reached is True and not force:
         return "limit_reached"
-    if usage.session_used is None and not force:
-        return "no session window data"
-    if not force:
-        # Window already burning quota — re-warm only wastes tokens.
-        if usage.session_used is not None and usage.session_used > idle_max_used:
-            return f"session already open (used {usage.session_used}% > idle max {idle_max_used}%)"
-        # used==0 but reset counting near full may still be a live empty window;
-        # only skip if used is above threshold. used<=idle_max_used proceeds.
+    if force:
+        return None
+
+    # Primary gate: countdown progress, not used%.
+    if is_session_progressing(usage):
+        elapsed = session_elapsed_seconds(usage) or 0
+        return (
+            f"timer already running "
+            f"(~{elapsed // 60}m into window, reset={usage.session_reset}s, used={usage.session_used}%)"
+        )
+
+    # Timer not progressing (reset missing / still ~full 5h) → needs warm even if used>0.
     return None
 
 
