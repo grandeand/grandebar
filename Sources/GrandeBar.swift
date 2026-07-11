@@ -619,12 +619,20 @@ final class QuotaViewController: NSViewController {
 
     private func recordWarmNewCount(_ count: Int) {
         warmNewClearWorkItem?.cancel()
-        warmNewClearWorkItem = nil
-        // Persist last warm result (including 0) until the next warm run.
+        // Show "warmed N" for a short while, then drop the suffix (buckets stay).
         lastWarmNewCount = count
         if !latestCards.isEmpty {
             setDetailLine(detailText(for: latestCards))
         }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.lastWarmNewCount = nil
+            if !self.latestCards.isEmpty {
+                self.setDetailLine(self.detailText(for: self.latestCards))
+            }
+        }
+        warmNewClearWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 25, execute: work)
     }
 
     private func setDetailLine(_ text: String?) {
@@ -972,35 +980,44 @@ final class QuotaViewController: NSViewController {
         return L.text("\(cards.count) account · \(resetTotal) reset", "\(cards.count) hesap · \(resetTotal) reset")
     }
 
-    /// Secondary header line under the classic summary.
-    /// Examples: `3 locked · 3 open · 0 new`  |  `… · warming…`
+    /// Secondary header line — mutually exclusive pool buckets (sum = account count):
+    ///   locked + open + cold == cards.count
     ///
-    /// - locked: allowed=false / limit_reached
-    /// - open: not locked AND 5h countdown has actually moved (≥2m off full 5h)
-    /// - new: last warm-run opened count (always shown, including 0)
+    /// - locked: credits/limit blocked
+    /// - open:   not locked, 5h timer actually ticking (≥2m off full 18000s)
+    /// - cold:   not locked, timer not progressing yet (needs warm)
+    ///
+    /// Optional suffix after a warm run (not part of the bucket sum):
+    ///   · warmed N   or   · warming…
     private func detailText(for cards: [QuotaCard], warming: Bool = false) -> String? {
         guard !cards.isEmpty else { return nil }
 
         let locked = cards.filter(\.isLocked).count
-        // Timer progress, not used%: full 5h00m remaining is NOT open yet.
         let open = cards.filter { card in
             guard !card.isLocked else { return false }
-            guard let reset = card.sessionResetSeconds else { return false }
-            let elapsed = max(0, 18_000 - reset)
-            return elapsed >= 120
+            return Self.isSessionTimerLive(resetSeconds: card.sessionResetSeconds)
         }.count
-        let newCount = lastWarmNewCount ?? 0
+        let cold = max(0, cards.count - locked - open)
 
         var parts: [String] = [
             L.text("\(locked) locked", "\(locked) kilitli"),
-            L.text("\(open) open", "\(open) açık")
+            L.text("\(open) open", "\(open) açık"),
+            L.text("\(cold) cold", "\(cold) soğuk")
         ]
         if warming {
             parts.append(L.text("warming…", "ısın…"))
-        } else {
-            parts.append(L.text("\(newCount) new", "\(newCount) yeni"))
+        } else if let warmed = lastWarmNewCount {
+            // Result of last flame click — NOT another account bucket.
+            parts.append(L.text("warmed \(warmed)", "ısındı \(warmed)"))
         }
         return parts.joined(separator: " · ")
+    }
+
+    /// True when the 5h countdown has moved enough to trust the window is live.
+    private static func isSessionTimerLive(resetSeconds: Int?, threshold: Int = 120) -> Bool {
+        guard let reset = resetSeconds else { return false }
+        let elapsed = max(0, 18_000 - reset)
+        return elapsed >= threshold
     }
 
     private func earliestResetExpiry(in cards: [QuotaCard]) -> (name: String, date: Date)? {
