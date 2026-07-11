@@ -619,7 +619,7 @@ final class QuotaViewController: NSViewController {
 
     private func recordWarmNewCount(_ count: Int) {
         warmNewClearWorkItem?.cancel()
-        // Show "warmed N" for a short while, then drop the suffix (buckets stay).
+        // Show "warmed N" for 15s (hide cold while visible), then restore cold bucket.
         lastWarmNewCount = count
         if !latestCards.isEmpty {
             setDetailLine(detailText(for: latestCards))
@@ -632,7 +632,7 @@ final class QuotaViewController: NSViewController {
             }
         }
         warmNewClearWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 25, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: work)
     }
 
     private func setDetailLine(_ text: String?) {
@@ -980,41 +980,55 @@ final class QuotaViewController: NSViewController {
         return L.text("\(cards.count) account · \(resetTotal) reset", "\(cards.count) hesap · \(resetTotal) reset")
     }
 
-    /// Secondary header line — mutually exclusive pool buckets (sum = account count):
-    ///   locked + open + cold == cards.count
+    /// Secondary header line — pool buckets (locked + open + cold == account count).
     ///
-    /// - locked: credits/limit blocked
-    /// - open:   not locked, 5h timer actually ticking (≥2m off full 18000s)
-    /// - cold:   not locked, timer not progressing yet (needs warm)
+    /// Display rules:
+    /// - locked: only if > 0
+    /// - open: always
+    /// - cold: always, except while "warmed N" is visible (15s after flame)
+    /// - warmed N: 15s after a warm run (not a bucket)
     ///
-    /// Optional suffix after a warm run (not part of the bucket sum):
-    ///   · warmed N   or   · warming…
+    /// Examples:
+    ///   `0 open · 6 cold`
+    ///   `6 open · 6 warmed`          (15s, no cold)
+    ///   `6 open · 0 cold`            (after 15s)
+    ///   `1 locked · 0 open · 5 cold`
+    ///   `1 locked · 5 open · 5 warmed` (15s)
+    ///   `1 locked · 5 open · 0 cold`
     private func detailText(for cards: [QuotaCard], warming: Bool = false) -> String? {
         guard !cards.isEmpty else { return nil }
 
         let locked = cards.filter(\.isLocked).count
+        // Display "open": countdown has moved off full 5h (even 1s). Stuck 18000 + used% is cold.
         let open = cards.filter { card in
             guard !card.isLocked else { return false }
-            return Self.isSessionTimerLive(resetSeconds: card.sessionResetSeconds)
+            return Self.isSessionTimerLive(resetSeconds: card.sessionResetSeconds, threshold: 1)
         }.count
         let cold = max(0, cards.count - locked - open)
+        let showingWarmed = lastWarmNewCount != nil
 
-        var parts: [String] = [
-            L.text("\(locked) locked", "\(locked) kilitli"),
-            L.text("\(open) open", "\(open) açık"),
-            L.text("\(cold) cold", "\(cold) soğuk")
-        ]
+        var parts: [String] = []
+        if locked > 0 {
+            parts.append(L.text("\(locked) locked", "\(locked) kilitli"))
+        }
+        parts.append(L.text("\(open) open", "\(open) açık"))
+
         if warming {
+            // During in-flight warm: hide cold (same as warmed window).
             parts.append(L.text("warming…", "ısın…"))
-        } else if let warmed = lastWarmNewCount {
-            // Result of last flame click — NOT another account bucket.
-            parts.append(L.text("warmed \(warmed)", "ısındı \(warmed)"))
+        } else if showingWarmed, let warmed = lastWarmNewCount {
+            // 15s window: show warmed, omit cold entirely.
+            parts.append(L.text("\(warmed) warmed", "\(warmed) warmed"))
+        } else {
+            // Normal: always show cold, including 0.
+            parts.append(L.text("\(cold) cold", "\(cold) cold"))
         }
         return parts.joined(separator: " · ")
     }
 
-    /// True when the 5h countdown has moved enough to trust the window is live.
-    private static func isSessionTimerLive(resetSeconds: Int?, threshold: Int = 120) -> Bool {
+    /// True when the 5h countdown has moved at least `threshold` seconds off full window.
+    /// Warm *skip* still uses a higher threshold (120s) in SessionWarmupAPI.
+    private static func isSessionTimerLive(resetSeconds: Int?, threshold: Int = 1) -> Bool {
         guard let reset = resetSeconds else { return false }
         let elapsed = max(0, 18_000 - reset)
         return elapsed >= threshold
