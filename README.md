@@ -12,15 +12,14 @@ The app sits in your macOS menu bar, shows the combined session pool percentage,
 
 ## Features
 
-- Menu bar percentage from the total session pool.
-- Compact popover with each account's 5-hour session quota and weekly quota.
+- Menu bar percentage from the combined weekly quota pool.
+- Compact popover with each account’s weekly quota (Team rate limits; 5h session window removed by OpenAI).
 - Reset credit count and nearest reset expiry.
 - One-click access to the Management Center quota page.
 - Auto refresh: manual, 5, 10, 15, 30, or 60 minutes.
-- Local token cost from `ccusage`.
-- Copyable English summary with token cost, total remaining quota, reset credits, and per-account remaining quota.
-- **Session warm**: flame button opens cold 5-hour windows on eligible accounts with one tiny Codex request each (skips locked / already-open).
-- Header status lines: `N account · R reset` plus `locked · open · new` detail under the title.
+- Local token cost from `ccusage` (bundled pricing overrides for models like `gpt-5.6-reasoning`; always `--speed standard` so Codex `service_tier=priority` does not inflate the footer).
+- Copyable English summary with token cost, total remaining weekly quota, reset credits, and per-account remaining quota.
+- Header status lines: `N account · R reset` plus `locked · open` detail under the title.
 
 ## Requirements
 

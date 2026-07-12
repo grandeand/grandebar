@@ -1,0 +1,73 @@
+{
+  "$schema": "https://ccusage.com/config-schema.json",
+  "defaults": {
+    "pricingOverrides": {
+      "gpt-5.6": {
+        "inputCostPerToken": 0.000005,
+        "outputCostPerToken": 0.00003,
+        "cacheReadInputTokenCost": 0.0000005
+      },
+      "gpt-5.6-reasoning": {
+        "inputCostPerToken": 0.000005,
+        "outputCostPerToken": 0.00003,
+        "cacheReadInputTokenCost": 0.0000005
+      },
+      "gpt-5.6-sol": {
+        "inputCostPerToken": 0.000005,
+        "outputCostPerToken": 0.00003,
+        "cacheReadInputTokenCost": 0.0000005
+      },
+      "gpt-5.6-luna": {
+        "inputCostPerToken": 0.000001,
+        "outputCostPerToken": 0.000006,
+        "cacheReadInputTokenCost": 0.0000001
+      },
+      "gpt-5.6-terra": {
+        "inputCostPerToken": 0.0000025,
+        "outputCostPerToken": 0.000015,
+        "cacheReadInputTokenCost": 0.00000025
+      },
+      "gpt-5.5-reasoning": {
+        "inputCostPerToken": 0.000005,
+        "outputCostPerToken": 0.00003,
+        "cacheReadInputTokenCost": 0.0000005
+      }
+    }
+  },
+  "codex": {
+    "defaults": {
+      "pricingOverrides": {
+        "gpt-5.6": {
+          "inputCostPerToken": 0.000005,
+          "outputCostPerToken": 0.00003,
+          "cacheReadInputTokenCost": 0.0000005
+        },
+        "gpt-5.6-reasoning": {
+          "inputCostPerToken": 0.000005,
+          "outputCostPerToken": 0.00003,
+          "cacheReadInputTokenCost": 0.0000005
+        },
+        "gpt-5.6-sol": {
+          "inputCostPerToken": 0.000005,
+          "outputCostPerToken": 0.00003,
+          "cacheReadInputTokenCost": 0.0000005
+        },
+        "gpt-5.6-luna": {
+          "inputCostPerToken": 0.000001,
+          "outputCostPerToken": 0.000006,
+          "cacheReadInputTokenCost": 0.0000001
+        },
+        "gpt-5.6-terra": {
+          "inputCostPerToken": 0.0000025,
+          "outputCostPerToken": 0.000015,
+          "cacheReadInputTokenCost": 0.00000025
+        },
+        "gpt-5.5-reasoning": {
+          "inputCostPerToken": 0.000005,
+          "outputCostPerToken": 0.00003,
+          "cacheReadInputTokenCost": 0.0000005
+        }
+      }
+    }
+  }
+}

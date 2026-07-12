@@ -11,6 +11,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/Assets/GrandeBar.icns" "$APP/Contents/Resources/GrandeBar.icns"
+cp "$ROOT/Resources/ccusage.json" "$APP/Contents/Resources/ccusage.json"
 
 swiftc \
   "$ROOT/Sources/GrandeBar.swift" \
