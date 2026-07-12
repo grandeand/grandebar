@@ -1,11 +1,10 @@
-# Session warmup (removed)
+# Session warmup
 
-The flame **session warmup** feature opened cold Codex **5-hour** rate-limit windows with one minimal Responses request per account.
+Flame button opens cold Codex **5-hour** rate-limit windows with one minimal Responses request per eligible account.
 
-As of GrandeBar **0.2.5**, OpenAI’s Team `wham/usage` payload no longer exposes a 5h (`limit_window_seconds == 18000`) window (only weekly / 7d). Warmup and Session 5h UI were removed accordingly.
+OpenAI may temporarily omit `limit_window_seconds == 18000` from Team `wham/usage` (only weekly present). GrandeBar still parses **both**:
 
-If OpenAI restores a short rolling window later:
+- `18000` → Session 5h
+- `604800` → Weekly
 
-1. Re-introduce parsing for `limit_window_seconds == 18000` (or the new value) in `QuotaAPI`.
-2. Restore per-account short-window metric + optional pool.
-3. Optionally restore warmup (`SessionWarmupAPI`) from git history around `v0.2.4`.
+When 5h returns in the API, Session 5h UI and warm skip logic light up again automatically.

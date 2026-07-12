@@ -89,11 +89,10 @@ private enum L {
 
 private enum UI {
     static let popoverWidth: CGFloat = 315
-    static let popoverHeight: CGFloat = 440
+    static let popoverHeight: CGFloat = 475
     static let cardWidth: CGFloat = 291
-    // Weekly-only card (5h session row removed).
-    static let accountCardHeight: CGFloat = 82
-    static let summaryCardHeight: CGFloat = 96
+    static let accountCardHeight: CGFloat = 106
+    static let summaryCardHeight: CGFloat = 104
 }
 
 private enum Theme {
@@ -150,6 +149,8 @@ private enum Theme {
 private struct QuotaCard {
     let name: String
     let plan: String
+    let sessionPercent: Int?
+    let sessionResetSeconds: Int?
     let weeklyPercent: Int?
     let weeklyResetSeconds: Int?
     let resetCreditsAvailableCount: Int?
@@ -179,6 +180,8 @@ private struct ResetCreditsInfo {
 }
 
 private struct TotalLimitSummary {
+    let sessionRemaining: Int?
+    let sessionTotal: Int?
     let weeklyRemaining: Int?
     let weeklyTotal: Int?
 }
@@ -200,7 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         icon?.isTemplate = true
         statusItem.button?.image = icon
         statusItem.button?.imagePosition = .imageLeading
-        setStatusTitle(" --%")
+        setStatusTitle(" --%\n --%")
         statusItem.button?.toolTip = "GrandeBar"
         statusItem.button?.target = self
         statusItem.button?.action = #selector(statusItemClicked)
@@ -323,16 +326,22 @@ final class QuotaViewController: NSViewController {
     private var stackView: NSStackView!
     private var scrollView: NSScrollView!
     private var subtitleLabel: NSTextField!
-    /// Second header line: locked / open status.
+    /// Second header line: locked / new / warm status (primary line stays short).
     private var detailLabel: NSTextField!
     private var usageLabel: NSTextField!
     private var lastRefreshLabel: NSTextField!
     private var refreshButton: NSButton!
+    private var warmButton: NSButton!
     private var copyButton: NSButton!
     private var lastRefreshAt: Date?
     private var elapsedTimer: Timer?
     private var autoRefreshTimer: Timer?
     private var isRefreshing = false
+    private var isWarming = false
+    private var activeWarmup: SessionWarmupAPI?
+    /// Last warm-run "new windows opened" count; shown in subtitle until cleared.
+    private var lastWarmNewCount: Int?
+    private var warmNewClearWorkItem: DispatchWorkItem?
     private var latestCards: [QuotaCard] = []
     private var latestUsage: LocalUsage?
 
@@ -382,7 +391,7 @@ final class QuotaViewController: NSViewController {
         subtitleLabel.lineBreakMode = .byTruncatingMiddle
         subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        // Line 2: locked / open
+        // Line 2: locked / new / warming — has full width under the title block
         detailLabel = NSTextField(labelWithString: "")
         detailLabel.font = .systemFont(ofSize: 10, weight: .medium)
         detailLabel.textColor = Theme.mutedText
@@ -395,6 +404,8 @@ final class QuotaViewController: NSViewController {
         titleBlock.addArrangedSubview(detailLabel)
         titleBlock.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
+        warmButton = toolbarButton("flame", title: nil, action: #selector(warmSessionsClicked), width: 28)
+        warmButton.toolTip = L.text("Warm all cold 5h session windows", "Soğuk 5s oturum pencerelerini aç")
         refreshButton = toolbarButton("arrow.clockwise", title: nil, action: #selector(refreshQuota), width: 28)
         refreshButton.toolTip = L.text("Refresh quota", "Kotayı yenile")
         let openButton = toolbarButton("arrow.up.right.square", title: nil, action: #selector(openPanel), width: 28)
@@ -402,6 +413,7 @@ final class QuotaViewController: NSViewController {
 
         header.addSubview(headerIcon)
         header.addSubview(titleBlock)
+        header.addSubview(warmButton)
         header.addSubview(refreshButton)
         header.addSubview(openButton)
 
@@ -476,8 +488,11 @@ final class QuotaViewController: NSViewController {
             refreshButton.trailingAnchor.constraint(equalTo: openButton.leadingAnchor, constant: -6),
             refreshButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
 
+            warmButton.trailingAnchor.constraint(equalTo: refreshButton.leadingAnchor, constant: -6),
+            warmButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+
             titleBlock.leadingAnchor.constraint(equalTo: headerIcon.trailingAnchor, constant: 8),
-            titleBlock.trailingAnchor.constraint(equalTo: refreshButton.leadingAnchor, constant: -8),
+            titleBlock.trailingAnchor.constraint(equalTo: warmButton.leadingAnchor, constant: -8),
             titleBlock.centerYAnchor.constraint(equalTo: header.centerYAnchor),
 
             divider.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
@@ -522,7 +537,7 @@ final class QuotaViewController: NSViewController {
 
     @objc func refreshQuota() {
         loadViewIfNeeded()
-        guard !isRefreshing else { return }
+        guard !isRefreshing, !isWarming else { return }
         if showSettingsIfNeeded(refreshAfterSave: true) {
             return
         }
@@ -530,10 +545,12 @@ final class QuotaViewController: NSViewController {
         lastRefreshLabel.stringValue = L.text("Refreshing...", "Yenileniyor...")
         refreshLocalUsage()
         setHeaderActionsEnabled(false)
-        subtitleLabel.stringValue = L.text("Refreshing...", "Yenileniyor...")
-        // Keep detail line visible if we already have pool info.
-        if latestCards.isEmpty {
-            setDetailLine(nil)
+        if !isWarming {
+            subtitleLabel.stringValue = L.text("Refreshing...", "Yenileniyor...")
+            // Keep detail line visible if we already have pool info.
+            if latestCards.isEmpty {
+                setDetailLine(nil)
+            }
         }
 
         api.fetchQuota { [weak self] result in
@@ -554,6 +571,70 @@ final class QuotaViewController: NSViewController {
         }
     }
 
+    @objc private func warmSessionsClicked() {
+        loadViewIfNeeded()
+        guard !isRefreshing, !isWarming else { return }
+        if showSettingsIfNeeded(refreshAfterSave: false) {
+            return
+        }
+
+        isWarming = true
+        setHeaderActionsEnabled(false)
+        // Primary line stays classic; detail line shows warm progress.
+        if !latestCards.isEmpty {
+            subtitleLabel.stringValue = summaryText(for: latestCards)
+        }
+        setDetailLine(detailText(for: latestCards, warming: true))
+        lastRefreshLabel.stringValue = L.text("Warming...", "Açılıyor...")
+
+        let warmup = SessionWarmupAPI()
+        activeWarmup = warmup
+        warmup.warmEligibleAccounts { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.activeWarmup = nil
+                self.isWarming = false
+                self.setHeaderActionsEnabled(true)
+
+                switch result {
+                case .success(let summary):
+                    self.recordWarmNewCount(summary.warmed)
+                    self.warmButton.toolTip = self.warmTooltip(for: summary)
+                    self.refreshQuota()
+                case .failure(let error):
+                    self.setDetailLine(L.text(
+                        "Warm failed · \(error.localizedDescription)",
+                        "Warm hata · \(error.localizedDescription)"
+                    ))
+                    self.warmButton.toolTip = L.text("Warm all cold 5h session windows", "Soğuk 5s oturum pencerelerini aç")
+                }
+            }
+        }
+    }
+
+    private func setHeaderActionsEnabled(_ enabled: Bool) {
+        warmButton.isEnabled = enabled
+        refreshButton.isEnabled = enabled
+    }
+
+    private func recordWarmNewCount(_ count: Int) {
+        warmNewClearWorkItem?.cancel()
+        // Show "warmed N" for 15s (hide cold while visible), then restore cold bucket.
+        lastWarmNewCount = count
+        if !latestCards.isEmpty {
+            setDetailLine(detailText(for: latestCards))
+        }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.lastWarmNewCount = nil
+            if !self.latestCards.isEmpty {
+                self.setDetailLine(self.detailText(for: self.latestCards))
+            }
+        }
+        warmNewClearWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: work)
+    }
+
     private func setDetailLine(_ text: String?) {
         let value = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if value.isEmpty {
@@ -565,8 +646,22 @@ final class QuotaViewController: NSViewController {
         }
     }
 
-    private func setHeaderActionsEnabled(_ enabled: Bool) {
-        refreshButton.isEnabled = enabled
+    private func warmTooltip(for summary: SessionWarmupSummary) -> String {
+        let lines = summary.results.map { item -> String in
+            let mark: String
+            switch item.action {
+            case .warmed: mark = "✓"
+            case .skipped: mark = "·"
+            case .failed: mark = "✗"
+            }
+            let shortAccount = item.account.split(separator: "@").first.map(String.init) ?? item.account
+            return "\(mark) \(shortAccount): \(item.note)"
+        }
+        let header = L.text(
+            "Warm: \(summary.warmed) new · \(summary.skipped) skip · \(summary.failed) fail",
+            "Warm: \(summary.warmed) yeni · \(summary.skipped) atlandı · \(summary.failed) hata"
+        )
+        return ([header] + lines).joined(separator: "\n")
     }
 
     deinit {
@@ -794,7 +889,7 @@ final class QuotaViewController: NSViewController {
         setDetailLine(detailText(for: cards))
         let summary = totalLimitSummary(for: cards)
         let title = menuBarPoolTitle(summary)
-        let tooltip = cards.map { "\($0.name): \($0.weeklyPercent.map(String.init) ?? "--")% weekly" }.joined(separator: "\n")
+        let tooltip = cards.map { "\($0.name): \($0.sessionPercent.map(String.init) ?? "--")% session, \($0.weeklyPercent.map(String.init) ?? "--")% weekly" }.joined(separator: "\n")
         statusUpdate(title, tooltip)
 
         let totalView = TotalLimitCardView(summary: summary)
@@ -873,8 +968,8 @@ final class QuotaViewController: NSViewController {
     }
 
     private func sortCards(_ lhs: QuotaCard, _ rhs: QuotaCard) -> Bool {
-        let left = lhs.weeklyPercent ?? 101
-        let right = rhs.weeklyPercent ?? 101
+        let left = min(lhs.sessionPercent ?? 101, lhs.weeklyPercent ?? 101)
+        let right = min(rhs.sessionPercent ?? 101, rhs.weeklyPercent ?? 101)
         if left != right { return left < right }
         return lhs.name < rhs.name
     }
@@ -885,19 +980,58 @@ final class QuotaViewController: NSViewController {
         return L.text("\(cards.count) account · \(resetTotal) reset", "\(cards.count) hesap · \(resetTotal) reset")
     }
 
-    /// Secondary header line: locked / open (no 5h cold/warm buckets).
-    private func detailText(for cards: [QuotaCard]) -> String? {
+    /// Secondary header line — pool buckets (locked + open + cold == account count).
+    ///
+    /// Display rules:
+    /// - locked: only if > 0
+    /// - open: always
+    /// - cold: always, except while "warmed N" is visible (15s after flame)
+    /// - warmed N: 15s after a warm run (not a bucket)
+    ///
+    /// Examples:
+    ///   `0 open · 6 cold`
+    ///   `6 open · 6 warmed`          (15s, no cold)
+    ///   `6 open · 0 cold`            (after 15s)
+    ///   `1 locked · 0 open · 5 cold`
+    ///   `1 locked · 5 open · 5 warmed` (15s)
+    ///   `1 locked · 5 open · 0 cold`
+    private func detailText(for cards: [QuotaCard], warming: Bool = false) -> String? {
         guard !cards.isEmpty else { return nil }
 
         let locked = cards.filter(\.isLocked).count
-        let open = cards.count - locked
+        // Display "open": countdown has moved off full 5h (even 1s). Stuck 18000 + used% is cold.
+        let open = cards.filter { card in
+            guard !card.isLocked else { return false }
+            return Self.isSessionTimerLive(resetSeconds: card.sessionResetSeconds, threshold: 1)
+        }.count
+        let cold = max(0, cards.count - locked - open)
+        let showingWarmed = lastWarmNewCount != nil
 
         var parts: [String] = []
         if locked > 0 {
             parts.append(L.text("\(locked) locked", "\(locked) kilitli"))
         }
         parts.append(L.text("\(open) open", "\(open) açık"))
+
+        if warming {
+            // During in-flight warm: hide cold (same as warmed window).
+            parts.append(L.text("warming…", "ısın…"))
+        } else if showingWarmed, let warmed = lastWarmNewCount {
+            // 15s window: show warmed, omit cold entirely.
+            parts.append(L.text("\(warmed) warmed", "\(warmed) warmed"))
+        } else {
+            // Normal: always show cold, including 0.
+            parts.append(L.text("\(cold) cold", "\(cold) cold"))
+        }
         return parts.joined(separator: " · ")
+    }
+
+    /// True when the 5h countdown has moved at least `threshold` seconds off full window.
+    /// Warm *skip* still uses a higher threshold (120s) in SessionWarmupAPI.
+    private static func isSessionTimerLive(resetSeconds: Int?, threshold: Int = 1) -> Bool {
+        guard let reset = resetSeconds else { return false }
+        let elapsed = max(0, 18_000 - reset)
+        return elapsed >= threshold
     }
 
     private func earliestResetExpiry(in cards: [QuotaCard]) -> (name: String, date: Date)? {
@@ -920,15 +1054,30 @@ final class QuotaViewController: NSViewController {
     }
 
     private func totalLimitSummary(for cards: [QuotaCard]) -> TotalLimitSummary {
+        let sessions = cards.compactMap { card -> Int? in
+            guard let session = card.sessionPercent else { return nil }
+            return card.weeklyPercent == 0 ? 0 : session
+        }
         let weeklies = cards.compactMap(\.weeklyPercent)
         return TotalLimitSummary(
+            sessionRemaining: sessions.isEmpty ? nil : sessions.reduce(0, +),
+            sessionTotal: sessions.isEmpty ? nil : sessions.count * 100,
             weeklyRemaining: weeklies.isEmpty ? nil : weeklies.reduce(0, +),
             weeklyTotal: weeklies.isEmpty ? nil : weeklies.count * 100
         )
     }
 
+    private func sessionPoolTitle(_ summary: TotalLimitSummary) -> String {
+        guard let remaining = summary.sessionRemaining,
+              let total = summary.sessionTotal,
+              total > 0 else {
+            return "--%"
+        }
+        return "\(Int((Double(remaining) / Double(total) * 100).rounded()))%"
+    }
+
     private func menuBarPoolTitle(_ summary: TotalLimitSummary) -> String {
-        paddedMenuBarPercent(poolPercentText(remaining: summary.weeklyRemaining, total: summary.weeklyTotal))
+        "\(paddedMenuBarPercent(sessionPoolTitle(summary)))\n\(paddedMenuBarPercent(poolPercentText(remaining: summary.weeklyRemaining, total: summary.weeklyTotal)))"
     }
 
     private func paddedMenuBarPercent(_ value: String) -> String {
@@ -952,15 +1101,15 @@ final class QuotaViewController: NSViewController {
         let weeklyTotal = poolPercentText(remaining: summary.weeklyRemaining, total: summary.weeklyTotal)
         let accounts = latestCards
             .sorted(by: sortCards)
-            .map { "- \(compactAccountName($0.name)): \(L.text("weekly", "haftalık")) \(percentText($0.weeklyPercent))" }
+            .map { "- \(compactAccountName($0.name)): \(L.text("session", "oturum")) \(percentText($0.sessionPercent)), \(L.text("weekly", "haftalık")) \(percentText($0.weeklyPercent))" }
             .joined(separator: "\n")
         let resetTotal = latestCards.compactMap(\.resetCreditsAvailableCount).reduce(0, +)
         let closestReset = earliestResetExpiry(in: latestCards)
             .map { "\(formatExpiry($0.date)) (\(compactAccountName($0.name)))" } ?? "--"
 
         return L.text(
-            "\(usageLine)\nRemaining total: weekly \(weeklyTotal). Reset credits: \(resetTotal), nearest expiry: \(closestReset).\nAccount remaining:\n\(accounts)",
-            "\(usageLine)\nToplam kalan: haftalık \(weeklyTotal). Reset hakkı: \(resetTotal), en yakın expire: \(closestReset).\nHesaplarda kalan:\n\(accounts)"
+            "\(usageLine)\nRemaining total: session \(sessionPoolTitle(summary)), weekly \(weeklyTotal). Reset credits: \(resetTotal), nearest expiry: \(closestReset).\nAccount remaining:\n\(accounts)",
+            "\(usageLine)\nToplam kalan: oturum \(sessionPoolTitle(summary)), haftalık \(weeklyTotal). Reset hakkı: \(resetTotal), en yakın expire: \(closestReset).\nHesaplarda kalan:\n\(accounts)"
         )
     }
 
@@ -1051,7 +1200,9 @@ private final class AccountCardView: RoundedView {
         resetExpiry.translatesAutoresizingMaskIntoConstraints = false
         resetExpiry.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
 
+        let session = MetricView(title: L.text("Session 5h", "Oturum 5s"), percent: card.sessionPercent, resetSeconds: card.sessionResetSeconds)
         let weekly = MetricView(title: L.text("Weekly", "Haftalık"), percent: card.weeklyPercent, resetSeconds: card.weeklyResetSeconds)
+        session.translatesAutoresizingMaskIntoConstraints = false
         weekly.translatesAutoresizingMaskIntoConstraints = false
 
         let separator = NSView()
@@ -1064,6 +1215,7 @@ private final class AccountCardView: RoundedView {
         addSubview(resetCount)
         addSubview(resetExpiry)
         addSubview(separator)
+        addSubview(session)
         addSubview(weekly)
 
         NSLayoutConstraint.activate([
@@ -1091,9 +1243,13 @@ private final class AccountCardView: RoundedView {
             separator.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 12),
             separator.heightAnchor.constraint(equalToConstant: 1),
 
-            weekly.leadingAnchor.constraint(equalTo: separator.leadingAnchor),
-            weekly.trailingAnchor.constraint(equalTo: separator.trailingAnchor),
-            weekly.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 8)
+            session.leadingAnchor.constraint(equalTo: separator.leadingAnchor),
+            session.trailingAnchor.constraint(equalTo: separator.trailingAnchor),
+            session.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 8),
+
+            weekly.leadingAnchor.constraint(equalTo: session.leadingAnchor),
+            weekly.trailingAnchor.constraint(equalTo: session.trailingAnchor),
+            weekly.topAnchor.constraint(equalTo: session.bottomAnchor, constant: 5)
         ])
     }
 
@@ -1131,25 +1287,36 @@ private final class TotalLimitCardView: RoundedView {
     init(summary: TotalLimitSummary) {
         super.init(color: Theme.cardBackground, radius: 8, borderColor: Theme.border)
 
+        let sessionPercent = percent(remaining: summary.sessionRemaining, total: summary.sessionTotal)
         let weeklyPercent = percent(remaining: summary.weeklyRemaining, total: summary.weeklyTotal)
-        let weekly = TotalMetricView(
-            title: L.text("Weekly pool", "Haftalık havuz"),
-            value: valueText(weeklyPercent),
-            detail: L.text("total remaining", "toplam kalan"),
-            percent: weeklyPercent,
-            tint: color(for: weeklyPercent)
-        )
+        let session = TotalMetricView(title: L.text("Session pool", "Oturum havuzu"), value: valueText(sessionPercent), detail: L.text("total remaining", "toplam kalan"), percent: sessionPercent, tint: color(for: sessionPercent))
+        let weekly = TotalMetricView(title: L.text("Weekly pool", "Haftalık havuz"), value: valueText(weeklyPercent), detail: L.text("total remaining", "toplam kalan"), percent: weeklyPercent, tint: color(for: weeklyPercent))
+        let divider = divider()
+        session.translatesAutoresizingMaskIntoConstraints = false
         weekly.translatesAutoresizingMaskIntoConstraints = false
+        divider.translatesAutoresizingMaskIntoConstraints = false
 
+        addSubview(session)
+        addSubview(divider)
         addSubview(weekly)
 
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: UI.summaryCardHeight),
 
-            weekly.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            session.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            session.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            session.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+
+            divider.leadingAnchor.constraint(equalTo: session.trailingAnchor, constant: 10),
+            divider.centerYAnchor.constraint(equalTo: centerYAnchor),
+            divider.widthAnchor.constraint(equalToConstant: 1),
+            divider.heightAnchor.constraint(equalToConstant: 64),
+
+            weekly.leadingAnchor.constraint(equalTo: divider.trailingAnchor, constant: 10),
             weekly.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            weekly.topAnchor.constraint(equalTo: topAnchor, constant: 12),
-            weekly.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12)
+            weekly.topAnchor.constraint(equalTo: session.topAnchor),
+            weekly.bottomAnchor.constraint(equalTo: session.bottomAnchor),
+            session.widthAnchor.constraint(equalTo: weekly.widthAnchor)
         ])
     }
 
@@ -1171,6 +1338,13 @@ private final class TotalLimitCardView: RoundedView {
         if percent <= 20 { return NSColor(calibratedRed: 1.0, green: 0.31, blue: 0.29, alpha: 1) }
         if percent <= 60 { return NSColor(calibratedRed: 1.0, green: 0.72, blue: 0.25, alpha: 1) }
         return NSColor(calibratedRed: 0.42, green: 0.84, blue: 0.34, alpha: 1)
+    }
+
+    private func divider() -> NSView {
+        let view = NSView()
+        view.wantsLayer = true
+        view.layer?.backgroundColor = Theme.divider.cgColor
+        return view
     }
 }
 
@@ -1409,13 +1583,12 @@ private enum LocalCodexUsage {
         let process = Process()
         let output = Pipe()
         process.executableURL = URL(fileURLWithPath: path)
-        // Offline + bundled pricingOverrides: embedded tables miss gpt-5.6-reasoning / sol.
-        // Always --speed standard so local service_tier=priority/fast does not 2x the footer cost.
+        // Offline + pricingOverrides; lock cost display to fast (upper bound).
         var arguments = [
             "codex", "daily",
             "--json",
             "--offline",
-            "--speed", "standard",
+            "--speed", "fast",
             "--timezone", TimeZone.current.identifier,
             "--since", since
         ]
@@ -1442,6 +1615,24 @@ private enum LocalCodexUsage {
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
+    /// Bundled pricing for models missing from ccusage embedded tables (e.g. gpt-5.6-reasoning).
+    private static func ccusageConfigPath() -> String? {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser.path
+        var candidates: [String] = []
+        if let bundled = Bundle.main.url(forResource: "ccusage", withExtension: "json")?.path {
+            candidates.append(bundled)
+        }
+        candidates.append("\(home)/.config/ccusage/ccusage.json")
+        let sourceTree = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Resources/ccusage.json")
+            .path
+        candidates.append(sourceTree)
+        return candidates.first { fm.isReadableFile(atPath: $0) }
+    }
+
     private static func ccusagePath() -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let candidates = [
@@ -1456,25 +1647,6 @@ private enum LocalCodexUsage {
             .split(separator: ":")
             .map { "\($0)/ccusage" }
             .first { FileManager.default.isExecutableFile(atPath: $0) }
-    }
-
-    /// Bundled pricing for models missing from ccusage embedded tables (e.g. gpt-5.6-reasoning).
-    private static func ccusageConfigPath() -> String? {
-        let fm = FileManager.default
-        let home = fm.homeDirectoryForCurrentUser.path
-        var candidates: [String] = []
-        if let bundled = Bundle.main.url(forResource: "ccusage", withExtension: "json")?.path {
-            candidates.append(bundled)
-        }
-        candidates.append("\(home)/.config/ccusage/ccusage.json")
-        // Dev / source-tree fallback when running an unpackaged binary.
-        let sourceTree = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Resources/ccusage.json")
-            .path
-        candidates.append(sourceTree)
-        return candidates.first { fm.isReadableFile(atPath: $0) }
     }
 
     private static func dateKeys() -> (today: String, weekStart: String, monthStart: String) {
@@ -1513,6 +1685,377 @@ private enum LocalCodexUsage {
         if lowercased.hasPrefix("gpt-5.5") { return "GPT-5.5" }
         if lowercased.hasPrefix("gpt-5.4") { return "GPT-5.4" }
         return model.uppercased()
+    }
+}
+
+// MARK: - Session warmup (open cold 5h windows)
+
+private enum SessionWarmAction {
+    case warmed
+    case skipped
+    case failed
+}
+
+private struct SessionWarmItem {
+    let account: String
+    let action: SessionWarmAction
+    let note: String
+}
+
+private struct SessionWarmupSummary {
+    let results: [SessionWarmItem]
+    var warmed: Int { results.filter { $0.action == .warmed }.count }
+    var skipped: Int { results.filter { $0.action == .skipped }.count }
+    var failed: Int { results.filter { $0.action == .failed }.count }
+}
+
+/// Opens cold Codex 5-hour session windows with one minimal Responses request per eligible account.
+private final class SessionWarmupAPI {
+    private let model = "gpt-5.4-mini"
+    /// Primary session window length (5h). used% alone is not enough — timer must actually tick.
+    private let sessionWindowSeconds = 18_000
+    /// Skip warm only after countdown has moved this many seconds off the full 5h.
+    private let progressThresholdSeconds = 120
+    private let responsesURL = "https://chatgpt.com/backend-api/codex/responses"
+    private let usageURL = "https://chatgpt.com/backend-api/wham/usage"
+
+    func warmEligibleAccounts(completion: @escaping (Result<SessionWarmupSummary, Error>) -> Void) {
+        guard let managementKey = UserDefaults.standard.string(forKey: AppConfig.defaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !managementKey.isEmpty else {
+            completion(.failure(NSError(
+                domain: "GrandeBar",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: L.text("Management key is missing", "Management key eksik")]
+            )))
+            return
+        }
+
+        // Strong self is intentional: keep this helper alive until nested URLSession work finishes.
+        apiJSON(path: "/auth-files", managementKey: managementKey) { result in
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let json):
+                let files = (json["files"] as? [[String: Any]] ?? [])
+                    .filter { ($0["disabled"] as? Bool) != true }
+                guard !files.isEmpty else {
+                    completion(.success(SessionWarmupSummary(results: [])))
+                    return
+                }
+
+                // Sequential to be gentle on the management proxy / upstream.
+                self.warmFiles(files, index: 0, managementKey: managementKey, acc: []) { items in
+                    completion(.success(SessionWarmupSummary(results: items)))
+                }
+            }
+        }
+    }
+
+    private func warmFiles(
+        _ files: [[String: Any]],
+        index: Int,
+        managementKey: String,
+        acc: [SessionWarmItem],
+        done: @escaping ([SessionWarmItem]) -> Void
+    ) {
+        if index >= files.count {
+            done(acc)
+            return
+        }
+
+        let file = files[index]
+        let authIndex = (file["auth_index"] as? String) ?? (file["authIndex"] as? String) ?? ""
+        let account = (file["account"] as? String) ?? (file["name"] as? String) ?? authIndex
+        guard !authIndex.isEmpty else {
+            warmFiles(files, index: index + 1, managementKey: managementKey, acc: acc + [
+                SessionWarmItem(account: account, action: .skipped, note: L.text("missing auth index", "auth index yok"))
+            ], done: done)
+            return
+        }
+
+        fetchUsage(authIndex: authIndex, managementKey: managementKey) { usageResult in
+            switch usageResult {
+            case .failure(let error):
+                self.warmFiles(files, index: index + 1, managementKey: managementKey, acc: acc + [
+                    SessionWarmItem(account: account, action: .failed, note: error.localizedDescription)
+                ], done: done)
+            case .success(let usage):
+                if let skip = self.skipReason(usage: usage) {
+                    self.warmFiles(files, index: index + 1, managementKey: managementKey, acc: acc + [
+                        SessionWarmItem(account: account, action: .skipped, note: skip)
+                    ], done: done)
+                    return
+                }
+
+                self.sendWarmRequest(
+                    authIndex: authIndex,
+                    accountId: usage.accountId,
+                    managementKey: managementKey
+                ) { warmResult in
+                    let item: SessionWarmItem
+                    switch warmResult {
+                    case .failure(let error):
+                        item = SessionWarmItem(account: account, action: .failed, note: error.localizedDescription)
+                    case .success(let detail):
+                        item = SessionWarmItem(account: account, action: .warmed, note: detail)
+                    }
+                    // Small gap between accounts.
+                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.25) {
+                        self.warmFiles(files, index: index + 1, managementKey: managementKey, acc: acc + [item], done: done)
+                    }
+                }
+            }
+        }
+    }
+
+    private struct UsageProbe {
+        let accountId: String?
+        let allowed: Bool?
+        let limitReached: Bool?
+        let usedPercent: Int?
+        let sessionResetSeconds: Int?
+        let limitType: String?
+
+        /// Seconds already elapsed in the 5h window (nil if reset unknown).
+        var elapsedSeconds: Int? {
+            guard let reset = sessionResetSeconds else { return nil }
+            return max(0, 18_000 - reset)
+        }
+
+        /// Timer has actually counted down — not just a stuck "5h00m" label with used=1%.
+        func isProgressing(threshold: Int) -> Bool {
+            guard let elapsed = elapsedSeconds else { return false }
+            return elapsed >= threshold
+        }
+    }
+
+    private func skipReason(usage: UsageProbe) -> String? {
+        if usage.allowed == false {
+            let detail = usage.limitType ?? ""
+            if detail.contains("credits_depleted") {
+                return L.text("locked (credits depleted)", "kilitli (kredi bitmiş)")
+            }
+            if !detail.isEmpty {
+                return L.text("locked (\(detail))", "kilitli (\(detail))")
+            }
+            return L.text("locked", "kilitli")
+        }
+        if usage.limitReached == true {
+            return L.text("limit reached", "limit dolu")
+        }
+        // Gate on countdown progress, not used%. Full 5h remaining → still needs warm.
+        if usage.isProgressing(threshold: progressThresholdSeconds) {
+            let mins = (usage.elapsedSeconds ?? 0) / 60
+            let used = usage.usedPercent.map { "\($0)%" } ?? "--"
+            return L.text(
+                "timer running (~\(mins)m in, used \(used))",
+                "sayaç işliyor (~\(mins)dk geçmiş, kullanım \(used))"
+            )
+        }
+        return nil
+    }
+
+    private func fetchUsage(authIndex: String, managementKey: String, completion: @escaping (Result<UsageProbe, Error>) -> Void) {
+        let payload: [String: Any] = [
+            "authIndex": authIndex,
+            "method": "GET",
+            "url": usageURL,
+            "header": [
+                "Authorization": "Bearer $TOKEN$",
+                "Content-Type": "application/json",
+                "User-Agent": "codex_cli_rs/0.76.0"
+            ]
+        ]
+        apiJSON(path: "/api-call", method: "POST", payload: payload, managementKey: managementKey) { result in
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let json):
+                if let status = json["status_code"] as? Int, status < 200 || status >= 300 {
+                    let body = json["body"] as? String ?? "HTTP \(status)"
+                    completion(.failure(NSError(domain: "GrandeBar", code: status, userInfo: [NSLocalizedDescriptionKey: body])))
+                    return
+                }
+                let body = json["body"] as? [String: Any] ?? self.parseJSONString(json["body"] as? String)
+                let lim = (body["rate_limit"] as? [String: Any]) ?? (body["rateLimit"] as? [String: Any]) ?? [:]
+                let pw = (lim["primary_window"] as? [String: Any]) ?? (lim["primaryWindow"] as? [String: Any]) ?? [:]
+                let rlt = body["rate_limit_reached_type"]
+                let limitType: String?
+                if let dict = rlt as? [String: Any] {
+                    limitType = dict["type"] as? String
+                } else {
+                    limitType = rlt as? String
+                }
+                completion(.success(UsageProbe(
+                    accountId: (body["account_id"] as? String) ?? (body["accountId"] as? String),
+                    allowed: lim["allowed"] as? Bool,
+                    limitReached: (lim["limit_reached"] as? Bool) ?? (lim["limitReached"] as? Bool),
+                    usedPercent: self.intValue(pw["used_percent"] ?? pw["usedPercent"]),
+                    sessionResetSeconds: self.intValue(pw["reset_after_seconds"] ?? pw["resetAfterSeconds"]),
+                    limitType: limitType
+                )))
+            }
+        }
+    }
+
+    private func sendWarmRequest(
+        authIndex: String,
+        accountId: String?,
+        managementKey: String,
+        completion: @escaping (Result<String, Error>) -> Void
+    ) {
+        var headers: [String: String] = [
+            "Authorization": "Bearer $TOKEN$",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "User-Agent": "codex_cli_rs/0.76.0 (session-warmup)",
+            "OpenAI-Beta": "responses=experimental",
+            "originator": "codex_cli_rs"
+        ]
+        if let accountId, !accountId.isEmpty {
+            headers["ChatGPT-Account-Id"] = accountId
+            headers["chatgpt-account-id"] = accountId
+        }
+
+        let body: [String: Any] = [
+            "model": model,
+            "instructions": "Reply with exactly: ok",
+            "input": [
+                [
+                    "type": "message",
+                    "role": "user",
+                    "content": [["type": "input_text", "text": "hi"]]
+                ]
+            ],
+            "tools": [] as [Any],
+            "tool_choice": "none",
+            "parallel_tool_calls": false,
+            "store": false,
+            "stream": true,
+            "include": [] as [Any],
+            "reasoning": ["effort": "none"]
+        ]
+
+        guard let data = try? JSONSerialization.data(withJSONObject: body),
+              let dataString = String(data: data, encoding: .utf8) else {
+            completion(.failure(NSError(domain: "GrandeBar", code: 10, userInfo: [NSLocalizedDescriptionKey: L.text("Could not build warm request", "Warm isteği oluşturulamadı")])))
+            return
+        }
+
+        let payload: [String: Any] = [
+            "authIndex": authIndex,
+            "method": "POST",
+            "url": responsesURL,
+            "header": headers,
+            "data": dataString
+        ]
+
+        apiJSON(path: "/api-call", method: "POST", payload: payload, managementKey: managementKey, timeout: 120) { result in
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let json):
+                let status = json["status_code"] as? Int ?? 0
+                let rawBody = json["body"] as? String ?? ""
+                if status < 200 || status >= 300 {
+                    let snippet = String(rawBody.prefix(200))
+                    completion(.failure(NSError(
+                        domain: "GrandeBar",
+                        code: status,
+                        userInfo: [NSLocalizedDescriptionKey: "HTTP \(status): \(snippet)"]
+                    )))
+                    return
+                }
+                let tokens = self.extractTotalTokens(from: rawBody)
+                if let tokens {
+                    completion(.success(L.text("opened · \(tokens) tok", "açıldı · \(tokens) tok")))
+                } else {
+                    completion(.success(L.text("opened", "açıldı")))
+                }
+            }
+        }
+    }
+
+    private func extractTotalTokens(from sseBody: String) -> Int? {
+        for line in sseBody.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("data:") else { continue }
+            let payload = trimmed.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            guard payload != "[DONE]",
+                  let data = payload.data(using: .utf8),
+                  let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            let response = (event["type"] as? String) == "response.completed"
+                ? (event["response"] as? [String: Any])
+                : (event["response"] as? [String: Any])
+            if let response,
+               let usage = response["usage"] as? [String: Any],
+               let total = intValue(usage["total_tokens"] ?? usage["totalTokens"]) {
+                return total
+            }
+            if let usage = event["usage"] as? [String: Any],
+               let total = intValue(usage["total_tokens"] ?? usage["totalTokens"]) {
+                return total
+            }
+        }
+        return nil
+    }
+
+    private func apiJSON(
+        path: String,
+        method: String = "GET",
+        payload: [String: Any]? = nil,
+        managementKey: String,
+        timeout: TimeInterval = 60,
+        completion: @escaping (Result<[String: Any], Error>) -> Void
+    ) {
+        guard let url = URL(string: "\(AppConfig.apiBase())/v0/management\(path)") else {
+            completion(.failure(NSError(domain: "GrandeBar", code: 3, userInfo: [NSLocalizedDescriptionKey: L.text("Base URL is invalid", "Base URL geçersiz")])))
+            return
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.timeoutInterval = timeout
+        request.setValue("Bearer \(managementKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("GrandeBar/0.2-warmup", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let payload {
+            request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+        }
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error {
+                completion(.failure(error))
+                return
+            }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let data = data ?? Data()
+            if status < 200 || status >= 300 {
+                let message = String(data: data, encoding: .utf8) ?? "HTTP \(status)"
+                completion(.failure(NSError(domain: "GrandeBar", code: status, userInfo: [NSLocalizedDescriptionKey: message])))
+                return
+            }
+            do {
+                let object = try JSONSerialization.jsonObject(with: data)
+                completion(.success(object as? [String: Any] ?? [:]))
+            } catch {
+                completion(.failure(error))
+            }
+        }.resume()
+    }
+
+    private func parseJSONString(_ string: String?) -> [String: Any] {
+        guard let data = string?.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+        return object
+    }
+
+    private func intValue(_ value: Any?) -> Int? {
+        if let number = value as? NSNumber { return Int(number.doubleValue.rounded()) }
+        if let string = value as? String, let number = Double(string) { return Int(number.rounded()) }
+        return nil
     }
 }
 
@@ -1596,6 +2139,8 @@ private final class QuotaAPI {
                     completion(.success(QuotaCard(
                         name: name,
                         plan: plan,
+                        sessionPercent: quota.sessionPercent,
+                        sessionResetSeconds: quota.sessionResetSeconds,
                         weeklyPercent: quota.weeklyPercent,
                         weeklyResetSeconds: quota.weeklyResetSeconds,
                         resetCreditsAvailableCount: resets.availableCount,
@@ -1650,7 +2195,7 @@ private final class QuotaAPI {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("Bearer \(managementKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("GrandeBar/0.2.6", forHTTPHeaderField: "User-Agent")
+        request.setValue("GrandeBar/0.2.7", forHTTPHeaderField: "User-Agent")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let payload {
             request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
@@ -1703,22 +2248,25 @@ private final class QuotaAPI {
         return ResetCreditsInfo(availableCount: available ?? expiries.count, expiries: expiries)
     }
 
-    /// Weekly (and monthly-range) windows only. 5h session windows are no longer returned by OpenAI.
-    private func quotaWindows(from usage: [String: Any]) -> (weeklyPercent: Int?, weeklyResetSeconds: Int?) {
+    private func quotaWindows(from usage: [String: Any]) -> (sessionPercent: Int?, sessionResetSeconds: Int?, weeklyPercent: Int?, weeklyResetSeconds: Int?) {
+        var sessionPercent: Int?
+        var sessionResetSeconds: Int?
         var weeklyPercent: Int?
         var weeklyResetSeconds: Int?
 
         for key in ["rate_limit", "rateLimit"] {
             if let limit = usage[key] as? [String: Any] {
-                updateWindows(from: limit, weeklyPercent: &weeklyPercent, weeklyResetSeconds: &weeklyResetSeconds)
+                updateWindows(from: limit, sessionPercent: &sessionPercent, sessionResetSeconds: &sessionResetSeconds, weeklyPercent: &weeklyPercent, weeklyResetSeconds: &weeklyResetSeconds)
             }
         }
 
-        return (weeklyPercent, weeklyResetSeconds)
+        return (sessionPercent, sessionResetSeconds, weeklyPercent, weeklyResetSeconds)
     }
 
     private func updateWindows(
         from limit: [String: Any],
+        sessionPercent: inout Int?,
+        sessionResetSeconds: inout Int?,
         weeklyPercent: inout Int?,
         weeklyResetSeconds: inout Int?
     ) {
@@ -1730,8 +2278,10 @@ private final class QuotaAPI {
             guard let seconds, let usedPercent else { continue }
             let percent = max(0, min(100, 100 - usedPercent))
 
-            // 7-day rolling window, or monthly-ish ranges OpenAI has used historically.
-            if seconds == 604_800 || (seconds >= 2_419_200 && seconds <= 2_678_400) {
+            if seconds == 18_000 {
+                sessionPercent = percent
+                sessionResetSeconds = reset
+            } else if seconds == 604_800 || (seconds >= 2_419_200 && seconds <= 2_678_400) {
                 weeklyPercent = percent
                 weeklyResetSeconds = reset
             }
