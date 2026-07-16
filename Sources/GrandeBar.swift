@@ -1546,31 +1546,41 @@ private final class FlippedStackView: NSStackView {
 }
 
 private enum LocalCodexUsage {
+    /// Aggregates ccusage across default ~/.codex and isolated multi-profile homes
+    /// (codex-grande, codex-aof, codex-main, …). ccusage only reads one CODEX_HOME per run.
     static func read() -> LocalUsage? {
         let dates = dateKeys()
-        guard let json = ccusageJSON(since: min(dates.weekStart, dates.monthStart)),
-              let rows = json["daily"] as? [[String: Any]] else {
-            return nil
-        }
+        let since = min(dates.weekStart, dates.monthStart)
+        let homes = codexHomes()
+        guard !homes.isEmpty else { return nil }
 
         var today = 0.0
         var week = 0.0
         var month = 0.0
         var models = Set<String>()
+        var anySuccess = false
 
-        for row in rows {
-            guard let date = row["date"] as? String,
-                  let cost = doubleValue(row["costUSD"]) else { continue }
-            if date == dates.today { today += cost }
-            if date >= dates.weekStart { week += cost }
-            if date >= dates.monthStart { month += cost }
-            if date >= dates.weekStart {
-                for model in modelNames(from: row) {
-                    models.insert(model)
+        for home in homes {
+            guard let json = ccusageJSON(since: since, codexHome: home),
+                  let rows = json["daily"] as? [[String: Any]] else {
+                continue
+            }
+            anySuccess = true
+            for row in rows {
+                guard let date = row["date"] as? String,
+                      let cost = doubleValue(row["costUSD"]) else { continue }
+                if date == dates.today { today += cost }
+                if date >= dates.weekStart { week += cost }
+                if date >= dates.monthStart { month += cost }
+                if date >= dates.weekStart {
+                    for model in modelNames(from: row) {
+                        models.insert(model)
+                    }
                 }
             }
         }
 
+        guard anySuccess else { return nil }
         return LocalUsage(today: today, week: week, month: month, models: models.sorted())
     }
 
@@ -1578,7 +1588,61 @@ private enum LocalCodexUsage {
         String(format: "$%.2f", amount)
     }
 
-    private static func ccusageJSON(since: String) -> [String: Any]? {
+    /// Default Codex home + m365bridge multi-profile homes that actually have sessions.
+    private static func codexHomes() -> [String] {
+        let fm = FileManager.default
+        let userHome = fm.homeDirectoryForCurrentUser.path
+        var homes: [String] = []
+        var seen = Set<String>()
+
+        func add(_ path: String) {
+            let resolved = (path as NSString).standardizingPath
+            guard !seen.contains(resolved) else { return }
+            var isDir: ObjCBool = false
+            // Prefer homes that already have session data (or a config.toml).
+            let sessions = (resolved as NSString).appendingPathComponent("sessions")
+            let config = (resolved as NSString).appendingPathComponent("config.toml")
+            let hasSessions = fm.fileExists(atPath: sessions, isDirectory: &isDir) && isDir.boolValue
+            let hasConfig = fm.isReadableFile(atPath: config)
+            guard hasSessions || hasConfig else { return }
+            seen.insert(resolved)
+            homes.append(resolved)
+        }
+
+        add("\(userHome)/.codex")
+
+        // m365bridge multi-account CLI profiles (codex-grande, codex-aof, …)
+        let bridgeRoots = [
+            "\(userHome)/m365bridge-next/codex-cli",
+            "\(userHome)/m365bridge-accounts/codex-cli"
+        ]
+        for root in bridgeRoots {
+            guard let children = try? fm.contentsOfDirectory(atPath: root) else { continue }
+            for name in children.sorted() {
+                add((root as NSString).appendingPathComponent(name))
+            }
+        }
+
+        // cli-profiles.json may list extra codex_home paths
+        let profileFiles = [
+            "\(userHome)/m365bridge-next/cli-profiles.json",
+            "\(userHome)/m365bridge-accounts/cli-profiles.json"
+        ]
+        for profilePath in profileFiles {
+            guard let data = fm.contents(atPath: profilePath),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let profiles = json["profiles"] as? [[String: Any]] else { continue }
+            for profile in profiles {
+                if let home = profile["codex_home"] as? String, !home.isEmpty {
+                    add(home)
+                }
+            }
+        }
+
+        return homes
+    }
+
+    private static func ccusageJSON(since: String, codexHome: String) -> [String: Any]? {
         guard let path = ccusagePath() else { return nil }
         let process = Process()
         let output = Pipe()
@@ -1599,6 +1663,8 @@ private enum LocalCodexUsage {
         var environment = ProcessInfo.processInfo.environment
         let extraPath = "\(FileManager.default.homeDirectoryForCurrentUser.path)/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         environment["PATH"] = "\(extraPath):\(environment["PATH"] ?? "")"
+        // Isolated profiles (codex-grande, …) store sessions under their own CODEX_HOME.
+        environment["CODEX_HOME"] = codexHome
         process.environment = environment
         process.standardOutput = output
         process.standardError = Pipe()
@@ -1684,6 +1750,8 @@ private enum LocalCodexUsage {
         if lowercased.hasPrefix("gpt-5.6") { return "GPT-5.6" }
         if lowercased.hasPrefix("gpt-5.5") { return "GPT-5.5" }
         if lowercased.hasPrefix("gpt-5.4") { return "GPT-5.4" }
+        if lowercased.contains("fable") { return "FABLE" }
+        if lowercased.hasPrefix("claude") { return "CLAUDE" }
         return model.uppercased()
     }
 }
@@ -2195,7 +2263,7 @@ private final class QuotaAPI {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("Bearer \(managementKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("GrandeBar/0.2.7", forHTTPHeaderField: "User-Agent")
+        request.setValue("GrandeBar/0.2.8", forHTTPHeaderField: "User-Agent")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let payload {
             request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
