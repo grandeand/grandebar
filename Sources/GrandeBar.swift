@@ -88,9 +88,10 @@ private enum L {
 }
 
 private enum UI {
-    static let popoverWidth: CGFloat = 315
+    /// Between original 315 and the too-wide 372; costs-only footer fits 5-digit $ amounts.
+    static let popoverWidth: CGFloat = 340
     static let popoverHeight: CGFloat = 475
-    static let cardWidth: CGFloat = 291
+    static let cardWidth: CGFloat = 316
     static let accountCardHeight: CGFloat = 106
     static let summaryCardHeight: CGFloat = 104
 }
@@ -1087,9 +1088,12 @@ final class QuotaViewController: NSViewController {
     private func usageTableText() -> String {
         var usageLine = L.text("ccusage unavailable.", "ccusage okunamadı.")
         if let usage = latestUsage {
+            let modelsSuffix = usage.models.isEmpty
+                ? ""
+                : L.text(" Models: \(usage.models.joined(separator: ", ")).", " Modeller: \(usage.models.joined(separator: ", ")).")
             usageLine = L.text(
-                "Token cost: today \(LocalCodexUsage.format(usage.today)), this week \(LocalCodexUsage.format(usage.week)), month to date \(LocalCodexUsage.format(usage.month)).",
-                "Token cost: bugün \(LocalCodexUsage.format(usage.today)), bu hafta \(LocalCodexUsage.format(usage.week)), ay başından beri \(LocalCodexUsage.format(usage.month))."
+                "Token cost: today \(LocalCodexUsage.format(usage.today)), this week \(LocalCodexUsage.format(usage.week)), month to date \(LocalCodexUsage.format(usage.month)).\(modelsSuffix)",
+                "Token cost: bugün \(LocalCodexUsage.format(usage.today)), bu hafta \(LocalCodexUsage.format(usage.week)), ay başından beri \(LocalCodexUsage.format(usage.month)).\(modelsSuffix)"
             )
         }
 
@@ -1117,10 +1121,10 @@ final class QuotaViewController: NSViewController {
         guard let usage else {
             return L.text("Today -- · Week -- · Month --", "Bugün -- · Hafta -- · Ay --")
         }
-        let modelText = usage.models.isEmpty ? "" : " · \(usage.models.joined(separator: ", "))"
+        // Keep footer to costs only so 4–5 digit $ amounts always fit; models go in copy summary.
         return L.text(
-            "Today \(LocalCodexUsage.format(usage.today)) · Week \(LocalCodexUsage.format(usage.week)) · Month \(LocalCodexUsage.format(usage.month))\(modelText)",
-            "Bugün \(LocalCodexUsage.format(usage.today)) · Hafta \(LocalCodexUsage.format(usage.week)) · Ay \(LocalCodexUsage.format(usage.month))\(modelText)"
+            "Today \(LocalCodexUsage.format(usage.today)) · Week \(LocalCodexUsage.format(usage.week)) · Month \(LocalCodexUsage.format(usage.month))",
+            "Bugün \(LocalCodexUsage.format(usage.today)) · Hafta \(LocalCodexUsage.format(usage.week)) · Ay \(LocalCodexUsage.format(usage.month))"
         )
     }
 
@@ -2263,7 +2267,7 @@ private final class QuotaAPI {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("Bearer \(managementKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("GrandeBar/0.2.8", forHTTPHeaderField: "User-Agent")
+        request.setValue("GrandeBar/0.2.9", forHTTPHeaderField: "User-Agent")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let payload {
             request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
