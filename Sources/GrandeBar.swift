@@ -89,9 +89,9 @@ private enum L {
 
 private enum UI {
     /// Between original 315 and the too-wide 372; costs-only footer fits 5-digit $ amounts.
-    static let popoverWidth: CGFloat = 340
+    static let popoverWidth: CGFloat = 325
     static let popoverHeight: CGFloat = 475
-    static let cardWidth: CGFloat = 316
+    static let cardWidth: CGFloat = 301
     static let accountCardHeight: CGFloat = 106
     static let summaryCardHeight: CGFloat = 104
 }
@@ -2267,7 +2267,7 @@ private final class QuotaAPI {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("Bearer \(managementKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("GrandeBar/0.2.9", forHTTPHeaderField: "User-Agent")
+        request.setValue("GrandeBar/0.2.10", forHTTPHeaderField: "User-Agent")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let payload {
             request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
