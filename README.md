@@ -17,7 +17,7 @@ The app sits in your macOS menu bar, shows the combined session pool percentage,
 - Reset credit count and nearest reset expiry.
 - One-click access to the Management Center quota page.
 - Auto refresh: manual, 5, 10, 15, 30, or 60 minutes.
-- Local token cost from `ccusage` across **all Codex homes** (`~/.codex` + `codex-grande` / `aof` / `main` isolated profiles); always `--speed fast` for upper-bound footer cost.
+- Local token cost from `ccusage` across **all Codex homes** (`~/.codex` + `codex-grande` / `aof` / `main` isolated profiles); uses `--speed standard` so priority service-tier records do not inflate the footer cost.
 - Copyable English summary with token cost, remaining quota, reset credits, and per-account remaining.
 - **Session warm**: flame button opens cold 5h windows when that window is present in usage data.
 - Header status lines: `N account · R reset` plus `locked · open · cold/warmed` detail.

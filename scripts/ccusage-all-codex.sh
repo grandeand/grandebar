@@ -3,7 +3,7 @@
 # (codex-grande, codex-aof, codex-main, …).
 set -euo pipefail
 
-SPEED="${CCUSAGE_SPEED:-fast}"
+SPEED="${CCUSAGE_SPEED:-standard}"
 SINCE="${CCUSAGE_SINCE:-}"
 TZ_NAME="${CCUSAGE_TZ:-$(date +%Z 2>/dev/null || echo Europe/Istanbul)}"
 # Prefer IANA if available

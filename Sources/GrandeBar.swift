@@ -1651,12 +1651,13 @@ private enum LocalCodexUsage {
         let process = Process()
         let output = Pipe()
         process.executableURL = URL(fileURLWithPath: path)
-        // Offline + pricingOverrides; lock cost display to fast (upper bound).
+        // Offline + pricingOverrides; use standard pricing so priority service
+        // tier records do not inflate the displayed cost.
         var arguments = [
             "codex", "daily",
             "--json",
             "--offline",
-            "--speed", "fast",
+            "--speed", "standard",
             "--timezone", TimeZone.current.identifier,
             "--since", since
         ]
