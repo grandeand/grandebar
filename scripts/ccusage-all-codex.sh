@@ -3,7 +3,9 @@
 # (codex-grande, codex-aof, codex-main, …).
 set -euo pipefail
 
-SPEED="${CCUSAGE_SPEED:-standard}"
+# GrandeBar costs must always use normal/standard pricing. Do not inherit a
+# shell-level CCUSAGE_SPEED value, since launch environments differ by machine.
+SPEED="standard"
 SINCE="${CCUSAGE_SINCE:-}"
 TZ_NAME="${CCUSAGE_TZ:-$(date +%Z 2>/dev/null || echo Europe/Istanbul)}"
 # Prefer IANA if available
