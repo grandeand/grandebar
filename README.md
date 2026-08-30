@@ -123,7 +123,7 @@ No management key is stored in the app bundle. The key is saved in macOS user de
 
 Codex 5-hour limits start on first real usage per account. If your CLIProxyAPI pool only hits one account at work start, other accounts stay cold.
 
-**In the app:** click the flame toolbar button next to refresh. Cold accounts get a minimal request; locked and already-open accounts are skipped. Status appears under the title (`N locked · M open · K new`). Hover the flame for a per-account report.
+**In the app:** automatic session warmup is enabled by default. GrandeBar schedules each run from the nearest real 5-hour reset and waits an additional 2 minutes before warming cold accounts. It also checks again when the Mac wakes. You can disable this in Settings or trigger the same flow manually with the flame button. Locked and already-open accounts are skipped.
 
 **CLI (optional):**
 

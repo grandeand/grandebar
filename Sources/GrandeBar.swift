@@ -9,6 +9,7 @@ private enum AppConfig {
     static let lastRefreshKey = "lastRefreshAt"
     static let autoRefreshMinutesKey = "autoRefreshMinutes"
     static let autoRefreshOptions = [0, 5, 10, 15, 30, 60]
+    static let automaticWarmupKey = "automaticSessionWarmup"
     static let appearanceKey = "appearanceMode"
     static let appearanceOptions = ["auto", "light", "dark"]
     static let languageKey = "languageMode"
@@ -36,6 +37,13 @@ private enum AppConfig {
 
     static func autoRefreshTitle(for minutes: Int) -> String {
         minutes == 0 ? L.text("Manual only", "Sadece manuel") : "\(minutes) \(L.text("min", "dk"))"
+    }
+
+    static func automaticWarmupEnabled() -> Bool {
+        if UserDefaults.standard.object(forKey: automaticWarmupKey) == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: automaticWarmupKey)
     }
 
     static func appearanceMode() -> String {
@@ -337,6 +345,8 @@ final class QuotaViewController: NSViewController {
     private var lastRefreshAt: Date?
     private var elapsedTimer: Timer?
     private var autoRefreshTimer: Timer?
+    private var automaticWarmupTimer: Timer?
+    private var wakeObserver: NSObjectProtocol?
     private var isRefreshing = false
     private var isWarming = false
     private var activeWarmup: SessionWarmupAPI?
@@ -350,6 +360,13 @@ final class QuotaViewController: NSViewController {
         self.statusUpdate = statusUpdate
         super.init(nibName: nil, bundle: nil)
         updateAutoRefreshTimer()
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.automaticWarmupCheck()
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -668,6 +685,10 @@ final class QuotaViewController: NSViewController {
     deinit {
         elapsedTimer?.invalidate()
         autoRefreshTimer?.invalidate()
+        automaticWarmupTimer?.invalidate()
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
     }
 
     @objc private func openPanel() {
@@ -700,6 +721,12 @@ final class QuotaViewController: NSViewController {
         let autoRefreshPopup = NSPopUpButton(frame: .zero, pullsDown: false)
         let appearancePopup = NSPopUpButton(frame: .zero, pullsDown: false)
         let languagePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        let automaticWarmup = NSButton(
+            checkboxWithTitle: L.text("Automatic session warmup", "Otomatik oturum warmup"),
+            target: nil,
+            action: nil
+        )
+        automaticWarmup.state = AppConfig.automaticWarmupEnabled() ? .on : .off
         let launchAtLogin = NSButton(checkboxWithTitle: L.text("Launch at Login", "Girişte aç"), target: nil, action: nil)
         launchAtLogin.state = SMAppService.mainApp.status == .enabled ? .on : .off
         baseField.placeholderString = "https://ai.example.com"
@@ -722,23 +749,24 @@ final class QuotaViewController: NSViewController {
         }
         languagePopup.selectItem(withTitle: AppConfig.languageTitle(for: AppConfig.languageMode()))
 
-        let settingsView = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 214))
+        let settingsView = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 238))
         settingsView.appearance = Theme.appAppearance
         let baseLabel = NSTextField(labelWithString: "Base URL")
         let keyLabel = NSTextField(labelWithString: L.text("Management key", "Management key"))
         let autoRefreshLabel = NSTextField(labelWithString: L.text("Auto refresh", "Otomatik yenile"))
         let appearanceLabel = NSTextField(labelWithString: L.text("Appearance", "Görünüm"))
         let languageLabel = NSTextField(labelWithString: L.text("Language", "Dil"))
-        baseLabel.frame = NSRect(x: 0, y: 190, width: 340, height: 18)
-        baseField.frame = NSRect(x: 0, y: 162, width: 340, height: 24)
-        keyLabel.frame = NSRect(x: 0, y: 136, width: 340, height: 18)
-        keyField.frame = NSRect(x: 0, y: 108, width: 340, height: 24)
-        autoRefreshLabel.frame = NSRect(x: 0, y: 80, width: 150, height: 22)
-        autoRefreshPopup.frame = NSRect(x: 156, y: 78, width: 184, height: 26)
-        appearanceLabel.frame = NSRect(x: 0, y: 52, width: 150, height: 22)
-        appearancePopup.frame = NSRect(x: 156, y: 50, width: 184, height: 26)
-        languageLabel.frame = NSRect(x: 0, y: 24, width: 150, height: 22)
-        languagePopup.frame = NSRect(x: 156, y: 22, width: 184, height: 26)
+        baseLabel.frame = NSRect(x: 0, y: 214, width: 340, height: 18)
+        baseField.frame = NSRect(x: 0, y: 186, width: 340, height: 24)
+        keyLabel.frame = NSRect(x: 0, y: 160, width: 340, height: 18)
+        keyField.frame = NSRect(x: 0, y: 132, width: 340, height: 24)
+        autoRefreshLabel.frame = NSRect(x: 0, y: 104, width: 150, height: 22)
+        autoRefreshPopup.frame = NSRect(x: 156, y: 102, width: 184, height: 26)
+        appearanceLabel.frame = NSRect(x: 0, y: 76, width: 150, height: 22)
+        appearancePopup.frame = NSRect(x: 156, y: 74, width: 184, height: 26)
+        languageLabel.frame = NSRect(x: 0, y: 48, width: 150, height: 22)
+        languagePopup.frame = NSRect(x: 156, y: 46, width: 184, height: 26)
+        automaticWarmup.frame = NSRect(x: 0, y: 20, width: 340, height: 22)
         launchAtLogin.frame = NSRect(x: 0, y: -4, width: 340, height: 22)
         settingsView.addSubview(baseLabel)
         settingsView.addSubview(baseField)
@@ -750,6 +778,7 @@ final class QuotaViewController: NSViewController {
         settingsView.addSubview(appearancePopup)
         settingsView.addSubview(languageLabel)
         settingsView.addSubview(languagePopup)
+        settingsView.addSubview(automaticWarmup)
         settingsView.addSubview(launchAtLogin)
 
         let alert = NSAlert()
@@ -770,9 +799,11 @@ final class QuotaViewController: NSViewController {
             UserDefaults.standard.set(autoRefreshPopup.selectedItem?.representedObject as? Int ?? 0, forKey: AppConfig.autoRefreshMinutesKey)
             UserDefaults.standard.set(appearancePopup.selectedItem?.representedObject as? String ?? "auto", forKey: AppConfig.appearanceKey)
             UserDefaults.standard.set(languagePopup.selectedItem?.representedObject as? String ?? "auto", forKey: AppConfig.languageKey)
+            UserDefaults.standard.set(automaticWarmup.state == .on, forKey: AppConfig.automaticWarmupKey)
             UserDefaults.standard.synchronize()
             reloadViewForAppearance()
             updateAutoRefreshTimer()
+            updateAutomaticWarmupSchedule(cards: latestCards)
             setLaunchAtLogin(launchAtLogin.state == .on)
             if refreshAfterSave && !managementKey.isEmpty {
                 refreshQuota()
@@ -864,6 +895,47 @@ final class QuotaViewController: NSViewController {
         autoRefreshTimer = timer
     }
 
+    private func updateAutomaticWarmupSchedule(cards: [QuotaCard]) {
+        automaticWarmupTimer?.invalidate()
+        automaticWarmupTimer = nil
+        guard AppConfig.automaticWarmupEnabled(), AppConfig.hasManagementKey(), !cards.isEmpty else { return }
+
+        let eligible = cards.filter { !$0.isLocked }
+        guard !eligible.isEmpty else { return }
+
+        let hasColdAccount = eligible.contains {
+            !Self.isSessionTimerLive(resetSeconds: $0.sessionResetSeconds, threshold: 1)
+        }
+        let delay: TimeInterval
+        if hasColdAccount {
+            delay = 1
+        } else if let nearestReset = eligible.compactMap(\.sessionResetSeconds).filter({ $0 > 0 }).min() {
+            delay = TimeInterval(nearestReset + 120)
+        } else {
+            delay = 15 * 60
+        }
+
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            self?.automaticWarmupCheck()
+        }
+        timer.tolerance = min(30, max(1, delay * 0.01))
+        RunLoop.main.add(timer, forMode: .common)
+        automaticWarmupTimer = timer
+    }
+
+    private func automaticWarmupCheck() {
+        guard AppConfig.automaticWarmupEnabled(), AppConfig.hasManagementKey() else { return }
+        guard !isRefreshing, !isWarming else {
+            let timer = Timer(timeInterval: 30, repeats: false) { [weak self] _ in
+                self?.automaticWarmupCheck()
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            automaticWarmupTimer = timer
+            return
+        }
+        warmSessionsClicked()
+    }
+
     private func updateLastRefreshLabel() {
         guard let lastRefreshAt else {
             lastRefreshLabel.stringValue = L.text("Last refresh: never", "Son güncelleme: yok")
@@ -886,6 +958,7 @@ final class QuotaViewController: NSViewController {
         }
 
         latestCards = cards
+        updateAutomaticWarmupSchedule(cards: cards)
         subtitleLabel.stringValue = summaryText(for: cards)
         setDetailLine(detailText(for: cards))
         let summary = totalLimitSummary(for: cards)
