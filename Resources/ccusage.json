@@ -2,6 +2,11 @@
   "$schema": "https://ccusage.com/config-schema.json",
   "defaults": {
     "pricingOverrides": {
+      "gpt-6-astra": {
+        "inputCostPerToken": 0.000005,
+        "outputCostPerToken": 0.00003,
+        "cacheReadInputTokenCost": 0.0000005
+      },
       "gpt-5.6": {
         "inputCostPerToken": 0.000005,
         "outputCostPerToken": 0.00003,
@@ -37,6 +42,11 @@
   "codex": {
     "defaults": {
       "pricingOverrides": {
+        "gpt-6-astra": {
+          "inputCostPerToken": 0.000005,
+          "outputCostPerToken": 0.00003,
+          "cacheReadInputTokenCost": 0.0000005
+        },
         "gpt-5.6": {
           "inputCostPerToken": 0.000005,
           "outputCostPerToken": 0.00003,

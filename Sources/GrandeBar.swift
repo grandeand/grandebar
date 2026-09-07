@@ -1825,6 +1825,8 @@ private enum LocalCodexUsage {
 
     private static func normalizedModelName(_ model: String) -> String {
         let lowercased = model.lowercased()
+        if lowercased.hasPrefix("gpt-6-astra") { return "GPT-6 ASTRA" }
+        if lowercased.hasPrefix("gpt-6") { return "GPT-6" }
         if lowercased.hasPrefix("gpt-5.6") { return "GPT-5.6" }
         if lowercased.hasPrefix("gpt-5.5") { return "GPT-5.5" }
         if lowercased.hasPrefix("gpt-5.4") { return "GPT-5.4" }
