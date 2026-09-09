@@ -419,8 +419,6 @@ final class QuotaViewController: NSViewController {
 
         warmButton = toolbarButton("flame", title: nil, action: #selector(warmSessionsClicked), width: 28)
         warmButton.toolTip = L.text("Warm all cold 5h session windows", "Soğuk 5s oturum pencerelerini aç")
-        warmButton.isHidden = true
-        warmButton.isEnabled = false
         refreshButton = toolbarButton("arrow.clockwise", title: nil, action: #selector(refreshQuota), width: 28)
         refreshButton.toolTip = L.text("Refresh quota", "Kotayı yenile")
         let openButton = toolbarButton("arrow.up.right.square", title: nil, action: #selector(openPanel), width: 28)
@@ -507,7 +505,7 @@ final class QuotaViewController: NSViewController {
             warmButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
 
             titleBlock.leadingAnchor.constraint(equalTo: headerIcon.trailingAnchor, constant: 8),
-            titleBlock.trailingAnchor.constraint(equalTo: refreshButton.leadingAnchor, constant: -8),
+            titleBlock.trailingAnchor.constraint(equalTo: warmButton.leadingAnchor, constant: -8),
             titleBlock.centerYAnchor.constraint(equalTo: header.centerYAnchor),
 
             divider.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
@@ -587,7 +585,6 @@ final class QuotaViewController: NSViewController {
     }
 
     @objc private func warmSessionsClicked() {
-        guard AppConfig.automaticWarmupEnabled() else { return }
         loadViewIfNeeded()
         guard !isRefreshing, !isWarming else { return }
         if showSettingsIfNeeded(refreshAfterSave: false) {

@@ -19,7 +19,8 @@ The app sits in your macOS menu bar, shows the combined session pool percentage,
 - Auto refresh: manual, 5, 10, 15, 30, or 60 minutes.
 - Local token cost from `ccusage` across **all Codex homes** (`~/.codex` + `codex-grande` / `aof` / `main` isolated profiles); uses `--speed standard` so priority service-tier records do not inflate the footer cost.
 - Copyable English summary with token cost, remaining quota, reset credits, and per-account remaining.
-- Header status lines: `N account · R reset` plus `locked · open · cold` detail.
+- **Manual session warm**: the flame button opens cold 5h windows through the configured remote management API.
+- Header status lines: `N account · R reset` plus `locked · open · cold/warmed` detail.
 
 ## Requirements
 
@@ -120,7 +121,7 @@ No management key is stored in the app bundle. The key is saved in macOS user de
 
 ## Session window warmup (multi-account)
 
-Codex 5-hour limits start on first real usage per account. GrandeBar reports whether each account window is open or cold, but no longer sends automatic or manual warmup requests.
+Codex 5-hour limits start on first real usage per account. Automatic warmup is disabled, but the flame button can manually warm eligible accounts through the configured API Base.
 
 **CLI (optional):**
 
