@@ -39,12 +39,7 @@ private enum AppConfig {
         minutes == 0 ? L.text("Manual only", "Sadece manuel") : "\(minutes) \(L.text("min", "dk"))"
     }
 
-    static func automaticWarmupEnabled() -> Bool {
-        if UserDefaults.standard.object(forKey: automaticWarmupKey) == nil {
-            return true
-        }
-        return UserDefaults.standard.bool(forKey: automaticWarmupKey)
-    }
+    static func automaticWarmupEnabled() -> Bool { false }
 
     static func appearanceMode() -> String {
         let saved = UserDefaults.standard.string(forKey: appearanceKey) ?? "auto"
@@ -424,6 +419,8 @@ final class QuotaViewController: NSViewController {
 
         warmButton = toolbarButton("flame", title: nil, action: #selector(warmSessionsClicked), width: 28)
         warmButton.toolTip = L.text("Warm all cold 5h session windows", "Soğuk 5s oturum pencerelerini aç")
+        warmButton.isHidden = true
+        warmButton.isEnabled = false
         refreshButton = toolbarButton("arrow.clockwise", title: nil, action: #selector(refreshQuota), width: 28)
         refreshButton.toolTip = L.text("Refresh quota", "Kotayı yenile")
         let openButton = toolbarButton("arrow.up.right.square", title: nil, action: #selector(openPanel), width: 28)
@@ -510,7 +507,7 @@ final class QuotaViewController: NSViewController {
             warmButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
 
             titleBlock.leadingAnchor.constraint(equalTo: headerIcon.trailingAnchor, constant: 8),
-            titleBlock.trailingAnchor.constraint(equalTo: warmButton.leadingAnchor, constant: -8),
+            titleBlock.trailingAnchor.constraint(equalTo: refreshButton.leadingAnchor, constant: -8),
             titleBlock.centerYAnchor.constraint(equalTo: header.centerYAnchor),
 
             divider.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
@@ -590,6 +587,7 @@ final class QuotaViewController: NSViewController {
     }
 
     @objc private func warmSessionsClicked() {
+        guard AppConfig.automaticWarmupEnabled() else { return }
         loadViewIfNeeded()
         guard !isRefreshing, !isWarming else { return }
         if showSettingsIfNeeded(refreshAfterSave: false) {
@@ -727,6 +725,8 @@ final class QuotaViewController: NSViewController {
             action: nil
         )
         automaticWarmup.state = AppConfig.automaticWarmupEnabled() ? .on : .off
+        automaticWarmup.state = .off
+        automaticWarmup.isEnabled = false
         let launchAtLogin = NSButton(checkboxWithTitle: L.text("Launch at Login", "Girişte aç"), target: nil, action: nil)
         launchAtLogin.state = SMAppService.mainApp.status == .enabled ? .on : .off
         baseField.placeholderString = "https://ai.example.com"
@@ -799,7 +799,7 @@ final class QuotaViewController: NSViewController {
             UserDefaults.standard.set(autoRefreshPopup.selectedItem?.representedObject as? Int ?? 0, forKey: AppConfig.autoRefreshMinutesKey)
             UserDefaults.standard.set(appearancePopup.selectedItem?.representedObject as? String ?? "auto", forKey: AppConfig.appearanceKey)
             UserDefaults.standard.set(languagePopup.selectedItem?.representedObject as? String ?? "auto", forKey: AppConfig.languageKey)
-            UserDefaults.standard.set(automaticWarmup.state == .on, forKey: AppConfig.automaticWarmupKey)
+            UserDefaults.standard.set(false, forKey: AppConfig.automaticWarmupKey)
             UserDefaults.standard.synchronize()
             reloadViewForAppearance()
             updateAutoRefreshTimer()

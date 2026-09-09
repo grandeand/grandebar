@@ -19,8 +19,7 @@ The app sits in your macOS menu bar, shows the combined session pool percentage,
 - Auto refresh: manual, 5, 10, 15, 30, or 60 minutes.
 - Local token cost from `ccusage` across **all Codex homes** (`~/.codex` + `codex-grande` / `aof` / `main` isolated profiles); uses `--speed standard` so priority service-tier records do not inflate the footer cost.
 - Copyable English summary with token cost, remaining quota, reset credits, and per-account remaining.
-- **Session warm**: flame button opens cold 5h windows when that window is present in usage data.
-- Header status lines: `N account · R reset` plus `locked · open · cold/warmed` detail.
+- Header status lines: `N account · R reset` plus `locked · open · cold` detail.
 
 ## Requirements
 
@@ -121,9 +120,7 @@ No management key is stored in the app bundle. The key is saved in macOS user de
 
 ## Session window warmup (multi-account)
 
-Codex 5-hour limits start on first real usage per account. If your CLIProxyAPI pool only hits one account at work start, other accounts stay cold.
-
-**In the app:** automatic session warmup is enabled by default. GrandeBar schedules each run from the nearest real 5-hour reset and waits an additional 2 minutes before warming cold accounts. It also checks again when the Mac wakes. You can disable this in Settings or trigger the same flow manually with the flame button. Locked and already-open accounts are skipped.
+Codex 5-hour limits start on first real usage per account. GrandeBar reports whether each account window is open or cold, but no longer sends automatic or manual warmup requests.
 
 **CLI (optional):**
 
