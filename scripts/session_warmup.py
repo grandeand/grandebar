@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-DEFAULT_MODEL = "gpt-5.4-mini"
+DEFAULT_MODEL = "gpt-5.6-luna"
 DEFAULT_IDLE_MAX_USED = 0  # legacy CLI flag; timer progress is the real gate
 DEFAULT_CONCURRENCY = 1
 # Session primary window length (5h). A window is "progressing" only after the

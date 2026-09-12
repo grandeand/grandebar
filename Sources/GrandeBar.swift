@@ -39,7 +39,9 @@ private enum AppConfig {
         minutes == 0 ? L.text("Manual only", "Sadece manuel") : "\(minutes) \(L.text("min", "dk"))"
     }
 
-    static func automaticWarmupEnabled() -> Bool { false }
+    static func automaticWarmupEnabled() -> Bool {
+        UserDefaults.standard.object(forKey: automaticWarmupKey) as? Bool ?? true
+    }
 
     static func appearanceMode() -> String {
         let saved = UserDefaults.standard.string(forKey: appearanceKey) ?? "auto"
@@ -722,8 +724,6 @@ final class QuotaViewController: NSViewController {
             action: nil
         )
         automaticWarmup.state = AppConfig.automaticWarmupEnabled() ? .on : .off
-        automaticWarmup.state = .off
-        automaticWarmup.isEnabled = false
         let launchAtLogin = NSButton(checkboxWithTitle: L.text("Launch at Login", "Girişte aç"), target: nil, action: nil)
         launchAtLogin.state = SMAppService.mainApp.status == .enabled ? .on : .off
         baseField.placeholderString = "https://ai.example.com"
@@ -796,7 +796,7 @@ final class QuotaViewController: NSViewController {
             UserDefaults.standard.set(autoRefreshPopup.selectedItem?.representedObject as? Int ?? 0, forKey: AppConfig.autoRefreshMinutesKey)
             UserDefaults.standard.set(appearancePopup.selectedItem?.representedObject as? String ?? "auto", forKey: AppConfig.appearanceKey)
             UserDefaults.standard.set(languagePopup.selectedItem?.representedObject as? String ?? "auto", forKey: AppConfig.languageKey)
-            UserDefaults.standard.set(false, forKey: AppConfig.automaticWarmupKey)
+            UserDefaults.standard.set(automaticWarmup.state == .on, forKey: AppConfig.automaticWarmupKey)
             UserDefaults.standard.synchronize()
             reloadViewForAppearance()
             updateAutoRefreshTimer()
@@ -1856,7 +1856,7 @@ private struct SessionWarmupSummary {
 
 /// Opens cold Codex 5-hour session windows with one minimal Responses request per eligible account.
 private final class SessionWarmupAPI {
-    private let model = "gpt-5.4-mini"
+    private let model = "gpt-5.6-luna"
     /// Primary session window length (5h). used% alone is not enough — timer must actually tick.
     private let sessionWindowSeconds = 18_000
     /// Skip warm only after countdown has moved this many seconds off the full 5h.
