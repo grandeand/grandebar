@@ -1912,6 +1912,7 @@ private final class SessionWarmupAPI {
         let file = files[index]
         let authIndex = (file["auth_index"] as? String) ?? (file["authIndex"] as? String) ?? ""
         let account = (file["account"] as? String) ?? (file["name"] as? String) ?? authIndex
+        let authFileName = (file["name"] as? String) ?? ""
         guard !authIndex.isEmpty else {
             warmFiles(files, index: index + 1, managementKey: managementKey, acc: acc + [
                 SessionWarmItem(account: account, action: .skipped, note: L.text("missing auth index", "auth index yok"))
@@ -1922,9 +1923,18 @@ private final class SessionWarmupAPI {
         fetchUsage(authIndex: authIndex, managementKey: managementKey) { usageResult in
             switch usageResult {
             case .failure(let error):
-                self.warmFiles(files, index: index + 1, managementKey: managementKey, acc: acc + [
-                    SessionWarmItem(account: account, action: .failed, note: error.localizedDescription)
-                ], done: done)
+                self.handleRevokedCredentialIfNeeded(
+                    error: error,
+                    authFileName: authFileName,
+                    managementKey: managementKey
+                ) { disabled in
+                    let note = disabled
+                        ? L.text("OAuth revoked · disabled automatically", "OAuth iptal · otomatik kapatıldı")
+                        : error.localizedDescription
+                    self.warmFiles(files, index: index + 1, managementKey: managementKey, acc: acc + [
+                        SessionWarmItem(account: account, action: disabled ? .skipped : .failed, note: note)
+                    ], done: done)
+                }
             case .success(let usage):
                 if let skip = self.skipReason(usage: usage) {
                     self.warmFiles(files, index: index + 1, managementKey: managementKey, acc: acc + [
@@ -1938,18 +1948,62 @@ private final class SessionWarmupAPI {
                     accountId: usage.accountId,
                     managementKey: managementKey
                 ) { warmResult in
-                    let item: SessionWarmItem
                     switch warmResult {
                     case .failure(let error):
-                        item = SessionWarmItem(account: account, action: .failed, note: error.localizedDescription)
+                        self.handleRevokedCredentialIfNeeded(
+                            error: error,
+                            authFileName: authFileName,
+                            managementKey: managementKey
+                        ) { disabled in
+                            let note = disabled
+                                ? L.text("OAuth revoked · disabled automatically", "OAuth iptal · otomatik kapatıldı")
+                                : error.localizedDescription
+                            let item = SessionWarmItem(
+                                account: account,
+                                action: disabled ? .skipped : .failed,
+                                note: note
+                            )
+                            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.25) {
+                                self.warmFiles(files, index: index + 1, managementKey: managementKey, acc: acc + [item], done: done)
+                            }
+                        }
                     case .success(let detail):
-                        item = SessionWarmItem(account: account, action: .warmed, note: detail)
-                    }
-                    // Small gap between accounts.
-                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.25) {
-                        self.warmFiles(files, index: index + 1, managementKey: managementKey, acc: acc + [item], done: done)
+                        let item = SessionWarmItem(account: account, action: .warmed, note: detail)
+                        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.25) {
+                            self.warmFiles(files, index: index + 1, managementKey: managementKey, acc: acc + [item], done: done)
+                        }
                     }
                 }
+            }
+        }
+    }
+
+    private func handleRevokedCredentialIfNeeded(
+        error: Error,
+        authFileName: String,
+        managementKey: String,
+        completion: @escaping (Bool) -> Void
+    ) {
+        let nsError = error as NSError
+        let message = nsError.localizedDescription.lowercased()
+        guard nsError.code == 401,
+              message.contains("token_revoked") || message.contains("invalidated oauth token"),
+              !authFileName.isEmpty else {
+            completion(false)
+            return
+        }
+
+        apiJSON(
+            path: "/auth-files/status",
+            method: "PATCH",
+            payload: ["name": authFileName, "disabled": true],
+            managementKey: managementKey
+        ) { result in
+            switch result {
+            case .success:
+                completion(true)
+            case .failure:
+                completion(false)
             }
         }
     }
