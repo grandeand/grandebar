@@ -856,7 +856,7 @@ final class QuotaViewController: NSViewController {
                     self.usageLabel.stringValue = self.usageLineText(usage)
                 } else {
                     self.latestUsage = nil
-                    self.usageLabel.stringValue = L.text("ccusage unavailable", "ccusage okunamadı")
+                    self.usageLabel.stringValue = L.text("Token cost unavailable", "Token maliyeti hesaplanamadı")
                 }
             }
         }
@@ -1156,7 +1156,7 @@ final class QuotaViewController: NSViewController {
     }
 
     private func usageTableText() -> String {
-        var usageLine = L.text("ccusage unavailable.", "ccusage okunamadı.")
+        var usageLine = L.text("Token cost unavailable (incomplete usage or missing model price).", "Token maliyeti hesaplanamadı (eksik kullanım veya model fiyatı).")
         if let usage = latestUsage {
             let modelsSuffix = usage.models.isEmpty
                 ? ""
@@ -1637,12 +1637,16 @@ private enum LocalCodexUsage {
         for home in homes {
             guard let json = ccusageJSON(since: since, codexHome: home),
                   let rows = json["daily"] as? [[String: Any]] else {
-                continue
+                return nil // A failed profile makes the aggregate incomplete.
             }
             anySuccess = true
             for row in rows {
                 guard let date = row["date"] as? String,
-                      let cost = doubleValue(row["costUSD"]) else { continue }
+                      let cost = doubleValue(row["costUSD"]),
+                      cost.isFinite, cost >= 0 else { return nil }
+                if date >= since, hasUnpricedUsage(row) {
+                    return nil
+                }
                 if date == dates.today { today += cost }
                 if date >= dates.weekStart { week += cost }
                 if date >= dates.monthStart { month += cost }
@@ -1721,8 +1725,8 @@ private enum LocalCodexUsage {
         let process = Process()
         let output = Pipe()
         process.executableURL = URL(fileURLWithPath: path)
-        // Offline + pricingOverrides; use standard pricing so priority service
-        // tier records do not inflate the displayed cost.
+        // Use bundled pricing overrides offline; standard pricing prevents
+        // priority service tier records from inflating the displayed cost.
         var arguments = [
             "codex", "daily",
             "--json",
@@ -1813,6 +1817,15 @@ private enum LocalCodexUsage {
         if let number = value as? NSNumber { return number.doubleValue }
         if let string = value as? String { return Double(string) }
         return nil
+    }
+
+    private static func hasUnpricedUsage(_ row: [String: Any]) -> Bool {
+        let input = doubleValue(row["inputTokens"]) ?? 0
+        let output = doubleValue(row["outputTokens"]) ?? 0
+        let cache = doubleValue(row["cacheReadTokens"]) ?? 0
+        let cost = doubleValue(row["costUSD"]) ?? 0
+        if cost == 0 && input + output + cache > 0 { return true }
+        return false
     }
 
     private static func modelNames(from row: [String: Any]) -> [String] {
