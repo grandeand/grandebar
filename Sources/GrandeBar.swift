@@ -3030,7 +3030,7 @@ private enum ClaudeAPI {
     static let usageURL = "https://api.anthropic.com/api/oauth/usage"
     static let profileURL = "https://api.anthropic.com/api/oauth/profile"
     static let messagesURL = "https://api.anthropic.com/v1/messages?beta=true"
-    static let warmModel = "claude-haiku-4-5"
+    static let warmModel = "claude-haiku-5-5"
     static let headers: [String: String] = [
         "Authorization": "Bearer $TOKEN$",
         "Content-Type": "application/json",
