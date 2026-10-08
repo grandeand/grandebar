@@ -198,6 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var quotaViewController: QuotaViewController!
     private var globalEventMonitor: Any?
     private var localEventMonitor: Any?
+    private var updater: GrandeBarUpdater!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -225,6 +226,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         popover.delegate = self
         popover.contentSize = NSSize(width: UI.popoverWidth, height: UI.popoverHeight)
         popover.contentViewController = quotaViewController
+        updater = GrandeBarUpdater()
+        updater.startAutomaticChecks()
 
         DispatchQueue.main.async { [weak self] in
             self?.quotaViewController.showSettingsIfNeeded(refreshAfterSave: true)
@@ -255,6 +258,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         menu.addItem(withTitle: L.text("Refresh", "Yenile"), action: #selector(refresh), keyEquivalent: "r")
         menu.addItem(withTitle: L.text("Open Panel", "Paneli Aç"), action: #selector(openPanel), keyEquivalent: "o")
         menu.addItem(withTitle: L.text("Settings", "Ayarlar"), action: #selector(showSettings), keyEquivalent: ",")
+        menu.addItem(withTitle: L.text("Check for Updates", "Güncellemeleri Denetle"), action: #selector(checkForUpdates), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: L.text("Quit", "Çık"), action: #selector(quit), keyEquivalent: "q")
         menu.items.forEach { $0.target = self }
@@ -271,6 +275,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     @objc private func showSettings() {
         quotaViewController.showSettings()
+    }
+
+    @objc private func checkForUpdates() {
+        Task { @MainActor in
+            updater.check(manual: true)
+        }
     }
 
     @objc private func quit() {
@@ -1746,17 +1756,17 @@ private enum LocalCodexUsage {
         environment["CODEX_HOME"] = codexHome
         process.environment = environment
         process.standardOutput = output
-        process.standardError = Pipe()
+        process.standardError = FileHandle.nullDevice
 
         do {
             try process.run()
-            process.waitUntilExit()
         } catch {
             return nil
         }
 
-        guard process.terminationStatus == 0 else { return nil }
         let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 

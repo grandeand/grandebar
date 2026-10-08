@@ -12,9 +12,12 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/Assets/GrandeBar.icns" "$APP/Contents/Resources/GrandeBar.icns"
 cp "$ROOT/Resources/ccusage.json" "$APP/Contents/Resources/ccusage.json"
+cp "$ROOT/scripts/install-update.sh" "$APP/Contents/Resources/install-update.sh"
+chmod 0755 "$APP/Contents/Resources/install-update.sh"
 
 swiftc \
   "$ROOT/Sources/GrandeBar.swift" \
+  "$ROOT/Sources/GrandeBarUpdater.swift" \
   "$ROOT/Sources/main.swift" \
   -framework AppKit \
   -framework ServiceManagement \
@@ -25,6 +28,7 @@ codesign --force --sign - "$APP"
 
 rm -rf "$OUTPUT"
 mkdir -p "$ROOT/dist"
-ditto "$APP" "$OUTPUT"
+ditto --noextattr "$APP" "$OUTPUT"
+xattr -cr "$OUTPUT"
 
 echo "$OUTPUT"
