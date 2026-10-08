@@ -41,7 +41,7 @@ GrandeBar looks for `ccusage` in:
 
 ## Install with Homebrew
 
-Download the macOS ZIP from the latest GitHub Release, extract it, and move GrandeBar.app to Applications. Right-click the menu bar icon to check for updates manually. GrandeBar also checks for new releases after launch and once a day, asks before installation, verifies the release ZIP checksum and app bundle, then restarts. Updates require write access to the installed app location.
+Download the macOS ZIP from the latest GitHub Release, extract it, and move GrandeBar.app to Applications. Right-click the menu bar icon to check for updates manually. GrandeBar also checks for new releases after launch and every 6 hours, asks before installation, verifies the release ZIP checksum and app bundle, then restarts. Updates require write access to the installed app location.
 
 ```bash
 brew install --cask grandeand/tap/grandebar

@@ -11,7 +11,7 @@ import Foundation
         DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
             self?.check(manual: false)
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 24 * 60 * 60, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 6 * 60 * 60, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.check(manual: false)
             }
