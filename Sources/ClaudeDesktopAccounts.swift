@@ -79,7 +79,19 @@ final class ClaudeDesktopApp: DesktopAppControl {
         return false
     }
 
+    /// `open` hands its own environment to the app, and Desktop passes that on to every Code
+    /// session, so Desktop gets a Dock-like environment instead of GrandeBar's.
     func launch() {
+        let open = Process()
+        open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        open.arguments = ["-b", Self.bundleID]
+        open.environment = ClaudeSessionEnvironment.cleanLaunchEnvironment()
+        open.standardOutput = FileHandle.nullDevice
+        open.standardError = FileHandle.nullDevice
+        if (try? open.run()) != nil {
+            open.waitUntilExit()
+            if open.terminationStatus == 0 { return }
+        }
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.bundleID) else { return }
         NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
     }
@@ -115,6 +127,40 @@ final class ClaudeDesktopApp: DesktopAppControl {
             let fromBundle = path.hasPrefix(bundle + "/Contents/") && !path.hasSuffix("/chrome-native-host")
             return fromBundle || path.hasPrefix(codeBinariesPath) ? pid : nil
         }
+    }
+}
+
+/// Variables a Claude Code session exports to its shell. GrandeBar started from such a shell
+/// (or relaunched by its updater from one) would otherwise pass them to Claude Desktop, which
+/// hands them to every Code session: a 1p session then runs with the 3p proxy, entrypoint and
+/// `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`.
+enum ClaudeSessionEnvironment {
+    private static let prefixes = ["CLAUDE_", "ANTHROPIC_", "DISABLE_"]
+    private static let names: Set<String> = ["CLAUDECODE", "ENABLE_TOOL_SEARCH"]
+    /// A user setting rather than session state; GrandeBar reads it to find Claude Code's transcripts.
+    private static let kept: Set<String> = ["CLAUDE_CONFIG_DIR"]
+    /// What launchd gives an app opened from the Dock.
+    private static let launchKeys = ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "SSH_AUTH_SOCK"]
+
+    static func isSessionKey(_ key: String) -> Bool {
+        guard !kept.contains(key) else { return false }
+        return names.contains(key) || prefixes.contains { key.hasPrefix($0) }
+    }
+
+    /// Run first in main.swift, so every child process starts without them too.
+    static func scrubCurrentProcess() {
+        for key in ProcessInfo.processInfo.environment.keys where isSessionKey(key) {
+            unsetenv(key)
+        }
+    }
+
+    static func cleanLaunchEnvironment(from current: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
+        var environment = current.filter { launchKeys.contains($0.key) }
+        environment["HOME"] = environment["HOME"] ?? NSHomeDirectory()
+        environment["USER"] = environment["USER"] ?? NSUserName()
+        environment["LOGNAME"] = environment["LOGNAME"] ?? NSUserName()
+        environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+        return environment
     }
 }
 
