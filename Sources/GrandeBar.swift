@@ -166,7 +166,7 @@ private enum UI {
     static let popoverWidth: CGFloat = 325
     static let popoverHeight: CGFloat = 507
     static let modeRowHeight: CGFloat = 26
-    static let providerCardHeight: CGFloat = 40
+    static let providerCardHeight: CGFloat = 66
     static let cardWidth: CGFloat = 301
     static let accountCardHeight: CGFloat = 106
     static let summaryCardHeight: CGFloat = 104
@@ -1150,9 +1150,7 @@ final class QuotaViewController: NSViewController {
         statusUpdate(title, tooltip)
 
         if mode == .claude {
-            let providerView = ProviderSwitchCardView { [weak self] proxy in
-                self?.switchClaudeProvider(proxy: proxy)
-            }
+            let providerView = makeProviderCard()
             stackView.addArrangedSubview(providerView)
             providerView.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
         }
@@ -1183,9 +1181,7 @@ final class QuotaViewController: NSViewController {
 
         // Keep the provider switch reachable when the proxy is down, so Claude can go back to Official.
         if AppConfig.mode() == .claude {
-            let providerView = ProviderSwitchCardView { [weak self] proxy in
-                self?.switchClaudeProvider(proxy: proxy)
-            }
+            let providerView = makeProviderCard()
             stackView.addArrangedSubview(providerView)
             providerView.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
         }
@@ -3497,7 +3493,7 @@ private enum LocalClaudeUsage {
     }
 }
 
-// MARK: - Claude provider switch (Claude Desktop + Claude Code)
+// MARK: - Claude provider switch (Claude Code route, Claude Desktop route and accounts)
 
 private enum ProviderMode {
     case official, proxy, other
@@ -3512,18 +3508,21 @@ private enum ProviderMode {
 }
 
 /// Writes Claude Desktop's third-party gateway profile (same layout CC Switch uses, under our
-/// own profile id) and the Claude Code `env` override. Every file is backed up once before the
-/// first change as `<file>.grandebar.bak`.
+/// own profile id) and, separately, the Claude Code `env` override. Every file is backed up once
+/// before the first change as `<file>.grandebar.bak`.
 private enum ClaudeProviderSwitcher {
     static let profileID = "4c1b2a10-5e1d-4000-8000-00000c11b0a1"
     static let profileName = "GrandeBar CLIProxy"
-    static let desktopBundleID = "com.anthropic.claudefordesktop"
     private static let gatewayKeys = ["inferenceGatewayApiKey", "inferenceGatewayAuthScheme", "inferenceGatewayBaseUrl", "inferenceProvider", "disableDeploymentModeChooser"]
 
     // GRANDEBAR_CLAUDE_HOME redirects every write to a sandbox directory for dry runs.
+    private static var sandboxHome: String? { ProcessInfo.processInfo.environment["GRANDEBAR_CLAUDE_HOME"] }
     private static var home: String {
-        ProcessInfo.processInfo.environment["GRANDEBAR_CLAUDE_HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
+        sandboxHome ?? FileManager.default.homeDirectoryForCurrentUser.path
     }
+    /// Sandboxed dry runs never quit or launch the real app.
+    static let desktopApp: DesktopAppControl = sandboxHome == nil ? ClaudeDesktopApp() : DetachedDesktopApp()
+    static let desktopAccounts = ClaudeDesktopAccounts(home: home, app: desktopApp)
     private static var appSupport: String { home + "/Library/Application Support" }
     private static var normalConfig: URL { URL(fileURLWithPath: appSupport + "/Claude/claude_desktop_config.json") }
     private static var threePConfig: URL { URL(fileURLWithPath: appSupport + "/Claude-3p/claude_desktop_config.json") }
@@ -3565,11 +3564,17 @@ private enum ClaudeProviderSwitcher {
         return AppConfig.localCredential("API_KEY")
     }
 
-    static func apply(proxy: Bool, apiKey: String?) throws {
+    private static func requireKey(_ apiKey: String?) throws -> String {
+        guard let apiKey, !apiKey.isEmpty else {
+            throw error(L.text("Proxy API key not found (management api-keys or ~/cliproxyapi/.credentials).", "Proxy API key bulunamadı (management api-keys veya ~/cliproxyapi/.credentials)."))
+        }
+        return apiKey
+    }
+
+    /// Claude Desktop must be closed: it rewrites its config on exit.
+    static func applyDesktop(proxy: Bool, apiKey: String?) throws {
         if proxy {
-            guard let apiKey, !apiKey.isEmpty else {
-                throw error(L.text("Proxy API key not found (management api-keys or ~/cliproxyapi/.credentials).", "Proxy API key bulunamadı (management api-keys veya ~/cliproxyapi/.credentials)."))
-            }
+            let apiKey = try requireKey(apiKey)
             try patch(normalConfig) { $0["deploymentMode"] = "3p" }
             try patch(threePConfig) { $0["deploymentMode"] = "3p" }
             try patch(profileFile, permissions: 0o600) { profile in
@@ -3589,12 +3594,6 @@ private enum ClaudeProviderSwitcher {
                 }
                 meta["entries"] = entries
                 meta["appliedId"] = profileID
-            }
-            try patch(codeSettings) { settings in
-                var env = settings["env"] as? [String: Any] ?? [:]
-                env["ANTHROPIC_BASE_URL"] = proxyBase
-                env["ANTHROPIC_AUTH_TOKEN"] = apiKey
-                settings["env"] = env
             }
         } else {
             try patch(normalConfig) { $0["deploymentMode"] = "1p" }
@@ -3621,38 +3620,29 @@ private enum ClaudeProviderSwitcher {
                     gatewayKeys.forEach { profile.removeValue(forKey: $0) }
                 }
             }
-            if fm.fileExists(atPath: codeSettings.path) {
-                try patch(codeSettings) { settings in
-                    var env = settings["env"] as? [String: Any] ?? [:]
-                    if let base = env["ANTHROPIC_BASE_URL"] as? String, AppConfig.normalizedBase(base) == proxyBase {
-                        env.removeValue(forKey: "ANTHROPIC_BASE_URL")
-                        env.removeValue(forKey: "ANTHROPIC_AUTH_TOKEN")
-                    }
-                    settings["env"] = env
+        }
+    }
+
+    /// Only `~/.claude/settings.json`; new Claude Code sessions pick it up, Desktop is untouched.
+    static func applyCode(proxy: Bool, apiKey: String?) throws {
+        if proxy {
+            let apiKey = try requireKey(apiKey)
+            try patch(codeSettings) { settings in
+                var env = settings["env"] as? [String: Any] ?? [:]
+                env["ANTHROPIC_BASE_URL"] = proxyBase
+                env["ANTHROPIC_AUTH_TOKEN"] = apiKey
+                settings["env"] = env
+            }
+        } else if FileManager.default.fileExists(atPath: codeSettings.path) {
+            try patch(codeSettings) { settings in
+                var env = settings["env"] as? [String: Any] ?? [:]
+                if let base = env["ANTHROPIC_BASE_URL"] as? String, AppConfig.normalizedBase(base) == proxyBase {
+                    env.removeValue(forKey: "ANTHROPIC_BASE_URL")
+                    env.removeValue(forKey: "ANTHROPIC_AUTH_TOKEN")
                 }
+                settings["env"] = env
             }
         }
-    }
-
-    static func runningDesktop() -> NSRunningApplication? {
-        NSRunningApplication.runningApplications(withBundleIdentifier: desktopBundleID).first
-    }
-
-    /// Claude Desktop rewrites its config on exit, so it must be closed before patching.
-    static func quitDesktopAndWait(timeout: TimeInterval = 20) -> Bool {
-        guard let app = runningDesktop() else { return true }
-        app.terminate()
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if runningDesktop() == nil { return true }
-            Thread.sleep(forTimeInterval: 0.5)
-        }
-        return runningDesktop() == nil
-    }
-
-    static func launchDesktop() {
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: desktopBundleID) else { return }
-        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
     }
 
     private static func readJSON(_ url: URL) -> [String: Any] {
@@ -3688,66 +3678,95 @@ private enum ClaudeProviderSwitcher {
     }
 }
 
-/// "Desktop · Code → claude.ai / CLIProxy": the filled chip is the active route; tapping the
-/// other one switches.
+/// Two independent routes, each "<target> → option / option" with the filled chip active:
+/// "Code" only edits ~/.claude/settings.json; "Desktop" picks a saved claude.ai login (menu on
+/// the account chip) or routes Desktop through CLIProxy.
 private final class ProviderSwitchCardView: RoundedView {
-    private let onChange: (Bool) -> Void
+    struct Actions {
+        let code: (Bool) -> Void
+        let desktopRoute: (Bool) -> Void
+        let desktopAccounts: (NSView) -> Void
+    }
 
-    init(onChange: @escaping (Bool) -> Void) {
-        self.onChange = onChange
+    init(actions: Actions) {
         super.init(color: Theme.cardBackground, radius: 10)
         translatesAutoresizingMaskIntoConstraints = false
 
-        let desktop = ClaudeProviderSwitcher.desktopMode()
         let code = ClaudeProviderSwitcher.codeMode()
-        let official = desktop == .official && code == .official
-        let proxy = desktop == .proxy && code == .proxy
-        toolTip = "Desktop: \(desktop.label) · Code: \(code.label)"
+        let desktop = ClaudeProviderSwitcher.desktopMode()
+        let alias = ClaudeProviderSwitcher.desktopAccounts.activeAlias()
+        let pending = DesktopLoginState.pendingAlias != nil
+        toolTip = "Code: \(code.label) · Desktop: \(desktop == .official ? (alias ?? "claude.ai") : desktop.label)"
 
-        let source = RouteChipView(text: "Desktop · Code", style: .neutral)
-        let arrow = NSImageView(image: NSImage(systemSymbolName: "arrow.right", accessibilityDescription: nil) ?? NSImage())
-        arrow.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
-        arrow.contentTintColor = Theme.mutedText
-        arrow.translatesAutoresizingMaskIntoConstraints = false
-        let officialChip = RouteChipView(text: "claude.ai", style: official ? .active : .option) { [weak self] in
-            if !official { self?.onChange(false) }
-        }
-        let slash = NSTextField(labelWithString: "/")
-        slash.font = .systemFont(ofSize: 11, weight: .regular)
-        slash.textColor = Theme.mutedText
-        slash.translatesAutoresizingMaskIntoConstraints = false
-        let proxyChip = RouteChipView(text: "CLIProxy", style: proxy ? .active : .option) { [weak self] in
-            if !proxy { self?.onChange(true) }
-        }
+        let codeLabel = RouteChipView(text: "Code", style: .neutral)
+        let codeRow = Self.row(
+            codeLabel,
+            RouteChipView(text: "claude.ai", style: code == .official ? .active : .option) { _ in actions.code(false) },
+            RouteChipView(text: "CLIProxy", style: code == .proxy ? .active : .option) { _ in actions.code(true) }
+        )
 
-        let row = NSStackView(views: [source, arrow, officialChip, slash, proxyChip])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 6
-        row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
+        let desktopLabel = RouteChipView(text: "Desktop", style: .neutral)
+        let accountText = pending ? L.text("waiting…", "bekleniyor…") : (alias ?? "claude.ai")
+        let accountChip = desktop == .official
+            ? RouteChipView(text: accountText, style: .active, showsMenu: true) { anchor in actions.desktopAccounts(anchor) }
+            : RouteChipView(text: accountText, style: .option) { _ in actions.desktopRoute(false) }
+        let desktopRow = Self.row(
+            desktopLabel,
+            accountChip,
+            RouteChipView(text: "CLIProxy", style: desktop == .proxy ? .active : .option) { _ in actions.desktopRoute(true) }
+        )
+
+        let rows = NSStackView(views: [codeRow, desktopRow])
+        rows.orientation = .vertical
+        rows.alignment = .leading
+        rows.spacing = 7
+        rows.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(rows)
 
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: UI.providerCardHeight),
-            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 11),
-            row.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -11),
-            row.centerYAnchor.constraint(equalTo: centerYAnchor)
+            rows.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 11),
+            rows.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -11),
+            rows.centerYAnchor.constraint(equalTo: centerYAnchor),
+            codeLabel.widthAnchor.constraint(equalTo: desktopLabel.widthAnchor),
+            accountChip.widthAnchor.constraint(lessThanOrEqualToConstant: 110)
         ])
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
+
+    private static func row(_ target: NSView, _ first: NSView, _ second: NSView) -> NSStackView {
+        let arrow = NSImageView(image: NSImage(systemSymbolName: "arrow.right", accessibilityDescription: nil) ?? NSImage())
+        arrow.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
+        arrow.contentTintColor = Theme.mutedText
+        arrow.translatesAutoresizingMaskIntoConstraints = false
+        let slash = NSTextField(labelWithString: "/")
+        slash.font = .systemFont(ofSize: 11, weight: .regular)
+        slash.textColor = Theme.mutedText
+        slash.translatesAutoresizingMaskIntoConstraints = false
+
+        let row = NSStackView(views: [target, arrow, first, slash, second])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        row.translatesAutoresizingMaskIntoConstraints = false
+        return row
+    }
 }
 
 private final class RouteChipView: NSView {
     enum Style { case neutral, active, option }
     private let style: Style
-    private let action: (() -> Void)?
+    private let showsMenu: Bool
+    private let action: ((NSView) -> Void)?
     private let dashed = CAShapeLayer()
 
-    init(text: String, style: Style, action: (() -> Void)? = nil) {
+    /// Option chips switch on tap; a `showsMenu` chip opens its menu even while active.
+    init(text: String, style: Style, showsMenu: Bool = false, action: ((NSView) -> Void)? = nil) {
         self.style = style
+        self.showsMenu = showsMenu
         self.action = action
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
@@ -3757,6 +3776,8 @@ private final class RouteChipView: NSView {
 
         let label = NSTextField(labelWithString: text)
         label.font = .systemFont(ofSize: 11, weight: style == .active ? .semibold : .regular)
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         label.translatesAutoresizingMaskIntoConstraints = false
         switch style {
         case .neutral:
@@ -3774,18 +3795,32 @@ private final class RouteChipView: NSView {
             dashed.lineDashPattern = [3, 2]
             layer?.addSublayer(dashed)
         }
-        addSubview(label)
+
+        let content = NSStackView(views: [label])
+        content.orientation = .horizontal
+        content.alignment = .centerY
+        content.spacing = 3
+        content.translatesAutoresizingMaskIntoConstraints = false
+        if showsMenu {
+            let chevron = NSImageView(image: NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil) ?? NSImage())
+            chevron.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 8, weight: .semibold)
+            chevron.contentTintColor = label.textColor
+            content.addArrangedSubview(chevron)
+        }
+        addSubview(content)
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
-            label.topAnchor.constraint(equalTo: topAnchor, constant: 3),
-            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3)
+            content.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7),
+            content.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
+            content.topAnchor.constraint(equalTo: topAnchor, constant: 3),
+            content.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3)
         ])
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
+
+    private var isTappable: Bool { style == .option || showsMenu }
 
     override func layout() {
         super.layout()
@@ -3796,79 +3831,338 @@ private final class RouteChipView: NSView {
     override func mouseDown(with event: NSEvent) {}
 
     override func mouseUp(with event: NSEvent) {
-        if style == .option { action?() }
+        if isTappable { action?(self) }
     }
 
     override func resetCursorRects() {
-        if style == .option { addCursorRect(bounds, cursor: .pointingHand) }
+        if isTappable { addCursorRect(bounds, cursor: .pointingHand) }
     }
 }
 
-extension QuotaViewController {
-    fileprivate func switchClaudeProvider(proxy: Bool) {
-        let target = proxy ? "CLIProxy" : L.text("Official account", "Resmi hesap")
-        let desktopRunning = ClaudeProviderSwitcher.runningDesktop() != nil
+/// Alias of the account being signed into while the add-account flow waits for Desktop.
+private enum DesktopLoginState {
+    static var pendingAlias: String?
+}
 
+extension QuotaViewController {
+    fileprivate func makeProviderCard() -> ProviderSwitchCardView {
+        ProviderSwitchCardView(actions: .init(
+            code: { [weak self] proxy in self?.switchClaudeCode(proxy: proxy) },
+            desktopRoute: { [weak self] proxy in self?.switchDesktopRoute(proxy: proxy) },
+            desktopAccounts: { [weak self] anchor in self?.showDesktopAccountMenu(from: anchor) }
+        ))
+    }
+
+    /// Rebuilds only the provider card, so an error screen stays as it is.
+    private func refreshProviderCard() {
+        guard let index = stackView.arrangedSubviews.firstIndex(where: { $0 is ProviderSwitchCardView }) else { return }
+        let old = stackView.arrangedSubviews[index]
+        stackView.removeArrangedSubview(old)
+        old.removeFromSuperview()
+        let card = makeProviderCard()
+        stackView.insertArrangedSubview(card, at: index)
+        card.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
+    }
+
+    private func finishProviderAction(_ failure: Error?) {
+        refreshProviderCard()
+        guard let failure else { return }
         let alert = NSAlert()
-        alert.messageText = L.text("Switch Claude to \(target)", "Claude'u \(target) moduna geçir")
-        var info = L.text(
-            "Claude Desktop and Claude Code settings will point to \(target).",
-            "Claude Desktop ve Claude Code ayarları \(target) olarak yazılacak."
-        )
-        if desktopRunning {
-            info += "\n\n" + L.text(
-                "Claude Desktop will quit and reopen. Open chats and Code sessions will be interrupted.",
-                "Claude Desktop kapatılıp yeniden açılacak. Açık sohbetler ve Code oturumları yarıda kalır."
-            )
-        }
-        if proxy {
-            info += "\n\n" + L.text(
-                "In CLIProxy mode Claude Desktop keeps a separate local chat history; claude.ai chats return when you switch back.",
-                "CLIProxy modunda Claude Desktop ayrı, yerel bir sohbet geçmişi tutar; claude.ai sohbetleri Resmi'ye dönünce geri gelir."
-            )
-        }
-        info += "\n\n" + L.text(
-            "Running Claude Code terminal sessions pick up the change after a restart.",
-            "Açık Claude Code terminal oturumları değişikliği yeniden başlatınca alır."
-        )
+        alert.messageText = L.text("Switch failed", "Geçiş yapılamadı")
+        alert.informativeText = Self.message(for: failure)
+        alert.window.appearance = Theme.appAppearance
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
+    private func confirm(_ title: String, _ info: String, button: String) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = title
         alert.informativeText = info
-        alert.addButton(withTitle: desktopRunning ? L.text("Apply and Restart", "Uygula ve yeniden başlat") : L.text("Apply", "Uygula"))
+        alert.addButton(withTitle: button)
         alert.addButton(withTitle: L.text("Cancel", "İptal"))
         alert.window.appearance = Theme.appAppearance
         NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            render(cards: latestCards)
-            return
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private func notify(_ title: String, _ info: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = info
+        alert.window.appearance = Theme.appAppearance
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
+    private static var restartNote: String {
+        L.text(
+            "Claude Desktop will quit and reopen. Open chats and Code sessions will be interrupted.",
+            "Claude Desktop kapatılıp yeniden açılacak. Açık sohbetler ve Code oturumları yarıda kalır."
+        )
+    }
+
+    private static func message(for error: Error) -> String {
+        guard let error = error as? DesktopAccountError else { return error.localizedDescription }
+        switch error {
+        case .invalidAlias(let alias):
+            return L.text("\"\(alias)\" is not a valid name. Use letters, digits, dot, dash or underscore (max 40).", "\"\(alias)\" geçerli bir ad değil. Harf, rakam, nokta, tire veya alt çizgi kullan (en fazla 40).")
+        case .aliasTaken(let alias):
+            return L.text("An account named \"\(alias)\" already exists.", "\"\(alias)\" adında bir hesap zaten var.")
+        case .unknownAlias(let alias):
+            return L.text("No saved account named \"\(alias)\".", "\"\(alias)\" adında kayıtlı hesap yok.")
+        case .alreadySaved(let alias):
+            return L.text("This Desktop login is already saved as \"\(alias)\".", "Bu Desktop oturumu zaten \"\(alias)\" olarak kayıtlı.")
+        case .notSignedIn:
+            return L.text("Claude Desktop is not signed in.", "Claude Desktop'ta açık bir oturum yok.")
+        case .missingSnapshot(let alias):
+            return L.text("\"\(alias)\" has no saved Desktop session yet. Sign in to it in Claude Desktop and save it again.", "\"\(alias)\" için kayıtlı Desktop oturumu yok. Claude Desktop'ta bu hesaba girip tekrar kaydet.")
+        case .desktopDidNotQuit:
+            return L.text("Claude Desktop did not quit; nothing was changed.", "Claude Desktop kapanmadı; hiçbir şey değişmedi.")
+        case .unreadableConfig:
+            return L.text("Claude Desktop's config.json could not be read; nothing was changed.", "Claude Desktop'ın config.json dosyası okunamadı; hiçbir şey değişmedi.")
+        case .loginCancelled:
+            return L.text("Sign-in cancelled.", "Giriş iptal edildi.")
+        case .loginTimedOut:
+            return L.text("No sign-in within 5 minutes.", "5 dakika içinde giriş yapılmadı.")
         }
+    }
+
+    // MARK: Claude Code route
+
+    fileprivate func switchClaudeCode(proxy: Bool) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            var failure: Error?
+            do {
+                let apiKey = proxy ? ClaudeProviderSwitcher.resolveAPIKey() : nil
+                try ClaudeProviderSwitcher.applyCode(proxy: proxy, apiKey: apiKey)
+            } catch {
+                failure = error
+            }
+            DispatchQueue.main.async { self.finishProviderAction(failure) }
+        }
+    }
+
+    // MARK: Claude Desktop route
+
+    fileprivate func switchDesktopRoute(proxy: Bool) {
+        guard DesktopLoginState.pendingAlias == nil else { return }
+        let target = proxy ? "CLIProxy" : "claude.ai"
+        let desktopRunning = ClaudeProviderSwitcher.desktopApp.isRunning
+        var info = L.text("Claude Desktop will use \(target). Claude Code is not changed.", "Claude Desktop \(target) kullanacak. Claude Code değişmez.")
+        if desktopRunning { info += "\n\n" + Self.restartNote }
+        if proxy {
+            info += "\n\n" + L.text(
+                "In CLIProxy mode Claude Desktop keeps a separate local chat history; claude.ai chats return when you switch back.",
+                "CLIProxy modunda Claude Desktop ayrı, yerel bir sohbet geçmişi tutar; claude.ai sohbetleri geri dönünce gelir."
+            )
+        }
+        let button = desktopRunning ? L.text("Apply and Restart", "Uygula ve yeniden başlat") : L.text("Apply", "Uygula")
+        guard confirm(L.text("Switch Claude Desktop to \(target)", "Claude Desktop'u \(target) moduna geçir"), info, button: button) else { return }
 
         DispatchQueue.global(qos: .userInitiated).async {
             var failure: Error?
+            let app = ClaudeProviderSwitcher.desktopApp
             let apiKey = proxy ? ClaudeProviderSwitcher.resolveAPIKey() : nil
-            let quitOK = ClaudeProviderSwitcher.quitDesktopAndWait()
-            if quitOK {
+            if app.quitAndWait(timeout: 25) {
                 do {
-                    try ClaudeProviderSwitcher.apply(proxy: proxy, apiKey: apiKey)
+                    try ClaudeProviderSwitcher.applyDesktop(proxy: proxy, apiKey: apiKey)
                 } catch {
                     failure = error
                 }
-                if desktopRunning {
-                    Thread.sleep(forTimeInterval: 1)
-                    ClaudeProviderSwitcher.launchDesktop()
-                }
+                if desktopRunning { app.launch() }
             } else {
-                failure = NSError(domain: "GrandeBar", code: 21, userInfo: [NSLocalizedDescriptionKey: L.text(
-                    "Claude Desktop did not quit; nothing was changed.",
-                    "Claude Desktop kapanmadı; hiçbir ayar değişmedi."
-                )])
+                failure = DesktopAccountError.desktopDidNotQuit
             }
-            DispatchQueue.main.async {
-                self.render(cards: self.latestCards)
-                if let failure {
-                    let alert = NSAlert(error: failure)
-                    alert.messageText = L.text("Switch failed", "Geçiş yapılamadı")
-                    alert.runModal()
+            DispatchQueue.main.async { self.finishProviderAction(failure) }
+        }
+    }
+
+    // MARK: Claude Desktop accounts
+
+    fileprivate func showDesktopAccountMenu(from anchor: NSView) {
+        let store = ClaudeProviderSwitcher.desktopAccounts
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        if let pending = DesktopLoginState.pendingAlias {
+            let waiting = NSMenuItem(title: L.text("Waiting for sign-in as \(pending)…", "\(pending) girişi bekleniyor…"), action: nil, keyEquivalent: "")
+            waiting.isEnabled = false
+            menu.addItem(waiting)
+            menu.addItem(menuItem(L.text("Cancel Sign-in", "Girişi iptal et"), #selector(cancelDesktopLogin)))
+        } else {
+            let accounts = store.accounts()
+            let active = store.activeAlias()
+            for account in accounts {
+                let item = menuItem(account.alias, #selector(desktopAccountChosen(_:)), represented: account.alias)
+                item.state = account.alias == active ? .on : .off
+                menu.addItem(item)
+            }
+            if !accounts.isEmpty { menu.addItem(.separator()) }
+            if active == nil, store.liveIsSignedIn() {
+                menu.addItem(menuItem(L.text("Save Current Login…", "Mevcut oturumu kaydet…"), #selector(saveCurrentDesktopLogin)))
+            }
+            menu.addItem(menuItem(L.text("Add Account…", "Hesap ekle…"), #selector(addDesktopAccount)))
+            if !accounts.isEmpty {
+                let remove = NSMenuItem(title: L.text("Remove", "Kaldır"), action: nil, keyEquivalent: "")
+                let submenu = NSMenu()
+                for account in accounts {
+                    submenu.addItem(menuItem(account.alias, #selector(removeDesktopAccount(_:)), represented: account.alias))
+                }
+                remove.submenu = submenu
+                menu.addItem(remove)
+            }
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.isFlipped ? anchor.bounds.height + 4 : -4), in: anchor)
+    }
+
+    private func menuItem(_ title: String, _ action: Selector, represented: Any? = nil) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.representedObject = represented
+        return item
+    }
+
+    @objc private func desktopAccountChosen(_ sender: NSMenuItem) {
+        guard let alias = sender.representedObject as? String,
+              alias != ClaudeProviderSwitcher.desktopAccounts.activeAlias() else { return }
+        let info = Self.restartNote + "\n\n" + L.text(
+            "Code tab sessions are listed per account.",
+            "Code sekmesindeki oturumlar hesaba göre listelenir."
+        )
+        guard confirm(L.text("Switch Claude Desktop to \(alias)", "Claude Desktop'u \(alias) hesabına geçir"), info, button: L.text("Switch", "Geçiş yap")) else { return }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var failure: Error?
+            do {
+                try ClaudeProviderSwitcher.desktopAccounts.switchTo(alias)
+            } catch {
+                failure = error
+            }
+            DispatchQueue.main.async { self.finishProviderAction(failure) }
+        }
+    }
+
+    @objc private func saveCurrentDesktopLogin() {
+        guard let names = promptNames(
+            L.text("Save Current Desktop Login", "Mevcut Desktop oturumunu kaydet"),
+            L.text("Name this account so you can switch back to it.", "Geri dönebilmek için bu hesaba bir ad ver."),
+            fields: [L.text("Account name", "Hesap adı")]
+        ) else { return }
+        var failure: Error?
+        do {
+            try ClaudeProviderSwitcher.desktopAccounts.saveCurrent(as: names[0])
+        } catch {
+            failure = error
+        }
+        finishProviderAction(failure)
+    }
+
+    @objc private func addDesktopAccount() {
+        let store = ClaudeProviderSwitcher.desktopAccounts
+        let unsavedLive = store.activeAlias() == nil && store.liveIsSignedIn()
+        var fields = [L.text("New account name", "Yeni hesap adı")]
+        if unsavedLive { fields.append(L.text("Current account name", "Mevcut hesabın adı")) }
+        var info = L.text(
+            "Claude Desktop reopens at its sign-in screen. Sign in with the new account within 5 minutes; if you cancel, the current account comes back.",
+            "Claude Desktop giriş ekranıyla yeniden açılır. Yeni hesapla 5 dakika içinde giriş yap; iptal edersen mevcut hesap geri gelir."
+        )
+        if unsavedLive {
+            info += "\n\n" + L.text("The current login is not saved yet, so it needs a name too.", "Mevcut oturum henüz kayıtlı değil; ona da bir ad ver.")
+        }
+        info += "\n\n" + Self.restartNote
+        guard let names = promptNames(L.text("Add Claude Desktop Account", "Claude Desktop hesabı ekle"), info, fields: fields) else { return }
+        let newAlias = names[0]
+        let currentAlias = unsavedLive ? names[1] : nil
+
+        DesktopLoginState.pendingAlias = newAlias
+        refreshProviderCard()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let rollback: DesktopSessionCopy?
+            do {
+                rollback = try store.beginLogin(newAlias: newAlias, currentAlias: currentAlias)
+            } catch {
+                DispatchQueue.main.async {
+                    DesktopLoginState.pendingAlias = nil
+                    self.finishProviderAction(error)
+                }
+                return
+            }
+            do {
+                let uuid = try store.waitForLogin()
+                let result = try store.finishLogin(newAlias: newAlias, accountUUID: uuid)
+                DispatchQueue.main.async {
+                    DesktopLoginState.pendingAlias = nil
+                    self.refreshProviderCard()
+                    switch result {
+                    case .added(let alias):
+                        self.notify(L.text("Added \(alias)", "\(alias) eklendi"), L.text("Claude Desktop is now signed in as \(alias).", "Claude Desktop şimdi \(alias) hesabında."))
+                    case .alreadySaved(let alias):
+                        self.notify(L.text("Already saved", "Zaten kayıtlı"), Self.message(for: DesktopAccountError.alreadySaved(alias)))
+                    }
+                }
+            } catch {
+                var failure: Error = error
+                do {
+                    try store.abortLogin(rollback: rollback)
+                } catch {
+                    failure = error
+                }
+                DispatchQueue.main.async {
+                    DesktopLoginState.pendingAlias = nil
+                    if case DesktopAccountError.loginCancelled = failure {
+                        self.refreshProviderCard()
+                    } else {
+                        self.finishProviderAction(failure)
+                    }
                 }
             }
         }
+    }
+
+    @objc private func cancelDesktopLogin() {
+        ClaudeProviderSwitcher.desktopAccounts.cancelPendingLogin()
+    }
+
+    @objc private func removeDesktopAccount(_ sender: NSMenuItem) {
+        guard let alias = sender.representedObject as? String else { return }
+        let info = L.text(
+            "Only GrandeBar's saved copy of this login is deleted; Claude Desktop is not changed.",
+            "Yalnız GrandeBar'ın bu oturum için sakladığı kopya silinir; Claude Desktop değişmez."
+        )
+        guard confirm(L.text("Remove \(alias)?", "\(alias) kaldırılsın mı?"), info, button: L.text("Remove", "Kaldır")) else { return }
+        var failure: Error?
+        do {
+            try ClaudeProviderSwitcher.desktopAccounts.remove(alias)
+        } catch {
+            failure = error
+        }
+        finishProviderAction(failure)
+    }
+
+    /// Asks for one name per field; nil when cancelled.
+    private func promptNames(_ title: String, _ info: String, fields: [String]) -> [String]? {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = info
+        alert.addButton(withTitle: L.text("Continue", "Devam"))
+        alert.addButton(withTitle: L.text("Cancel", "İptal"))
+        let inputs = fields.map { placeholder -> NSTextField in
+            let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 22))
+            field.placeholderString = placeholder
+            field.translatesAutoresizingMaskIntoConstraints = false
+            field.widthAnchor.constraint(equalToConstant: 240).isActive = true
+            return field
+        }
+        let stack = NSStackView(views: inputs)
+        stack.orientation = .vertical
+        stack.spacing = 8
+        stack.frame = NSRect(x: 0, y: 0, width: 240, height: CGFloat(inputs.count) * 30 - 8)
+        alert.accessoryView = stack
+        alert.window.appearance = Theme.appAppearance
+        alert.window.initialFirstResponder = inputs.first
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return inputs.map { $0.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 }
