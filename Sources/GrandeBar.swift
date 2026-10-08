@@ -3151,54 +3151,180 @@ private struct ClaudeQuota {
     }
 }
 
-/// Claude Code cost from `ccusage claude daily`. Online pricing on purpose: the offline table
-/// lacks current Claude models and reports $0 for them.
+/// Claude Code cost computed directly from `~/.claude/projects/**/*.jsonl` (subagent and
+/// workflow transcripts included). Claude Code writes one assistant response as several
+/// lines and only the last one carries the final output count, so records are deduplicated
+/// by message id + request id keeping the largest output. `ccusage claude` takes earlier
+/// lines and skips part of the subagent records, which undercounts heavy days by ~15%.
 private enum LocalClaudeUsage {
+    private struct Entry {
+        let date: Date
+        let model: String
+        let input: Int
+        let output: Int
+        let cacheWrite5m: Int
+        let cacheWrite1h: Int
+        let cacheRead: Int
+        let fast: Bool
+    }
+
+    private struct FileState {
+        var offset: UInt64 = 0
+        var entries: [String: Entry] = [:]
+    }
+
+    /// USD per million tokens. Ordered so a more specific id wins over its prefix.
+    private static let prices: [(id: String, input: Double, output: Double, cacheRead: Double)] = [
+        ("fable-5-1", 10, 50, 0.25),
+        ("mythos-5-1", 10, 50, 0.25),
+        ("fable", 10, 50, 1.0),
+        ("mythos", 10, 50, 1.0),
+        ("opus-5-5", 4, 20, 0.20),
+        ("opus", 5, 25, 0.50),
+        ("sonnet-4", 3, 15, 0.30),
+        ("sonnet", 2, 10, 0.20),
+        ("haiku-5-5", 0.10, 0.50, 0.01),
+        ("haiku", 1, 5, 0.10)
+    ]
+
+    private static let lock = NSLock()
+    private static var files: [String: FileState] = [:]
+    private static let usageMarker = Data("\"usage\"".utf8)
+    private static let assistantMarker = Data("\"assistant\"".utf8)
+
     static func read() -> LocalUsage? {
+        lock.lock()
+        defer { lock.unlock() }
+
         let dates = dateKeys()
         let since = min(dates.weekStart, dates.monthStart)
-        guard let json = ccusageJSON(since: since),
-              let rows = json["daily"] as? [[String: Any]] else { return nil }
+        let paths = transcriptPaths(modifiedSince: since)
+        guard !paths.isEmpty else { return nil }
 
+        files = files.filter { paths.contains($0.key) }
+        for path in paths { update(path) }
+
+        // The same response can appear in a parent and a subagent transcript.
+        var merged: [String: Entry] = [:]
+        for state in files.values {
+            for (key, entry) in state.entries where merged[key].map({ entry.output > $0.output }) ?? true {
+                merged[key] = entry
+            }
+        }
+
+        let formatter = dayFormatter()
         var today = 0.0, week = 0.0, month = 0.0
         var models = Set<String>()
-        for row in rows {
-            guard let date = row["date"] as? String,
-                  let cost = double(row["totalCost"] ?? row["costUSD"]), cost.isFinite, cost >= 0 else { continue }
-            if date == dates.today { today += cost }
-            if date >= dates.weekStart {
+        for entry in merged.values {
+            guard let cost = cost(entry) else { continue }
+            let day = formatter.string(from: entry.date)
+            if day == dates.today { today += cost }
+            if day >= dates.weekStart {
                 week += cost
-                for breakdown in row["modelBreakdowns"] as? [[String: Any]] ?? [] {
-                    if let name = breakdown["modelName"] as? String { models.insert(family(name)) }
-                }
+                models.insert(family(entry.model))
             }
-            if date >= dates.monthStart { month += cost }
+            if day >= dates.monthStart { month += cost }
         }
         return LocalUsage(today: today, week: week, month: month, models: models.sorted())
     }
 
-    private static func ccusageJSON(since: String) -> [String: Any]? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let candidates = ["\(home)/.npm-global/bin/ccusage", "/opt/homebrew/bin/ccusage", "/usr/local/bin/ccusage"]
-        guard let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return nil }
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = ["claude", "daily", "--json", "--timezone", TimeZone.current.identifier, "--since", since]
-        var environment = ProcessInfo.processInfo.environment
-        environment["PATH"] = "\(home)/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:\(environment["PATH"] ?? "")"
-        process.environment = environment
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            return nil
+    private static func cost(_ entry: Entry) -> Double? {
+        let model = entry.model.lowercased()
+        guard var price = prices.first(where: { model.contains($0.id) }) else { return nil }
+        let prompt = entry.input + entry.cacheWrite5m + entry.cacheWrite1h + entry.cacheRead
+        if price.id == "haiku-5-5", prompt > 100_000 {
+            price = (price.id, 0.50, 2.50, 0.05)
         }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
-        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let input = Double(entry.input) * price.input
+            + Double(entry.cacheWrite5m) * price.input * 1.25
+            + Double(entry.cacheWrite1h) * price.input * 2
+            + Double(entry.cacheRead) * price.cacheRead
+        let total = (input + Double(entry.output) * price.output) / 1_000_000
+        return entry.fast ? total * 2 : total
+    }
+
+    private static func transcriptPaths(modifiedSince day: String) -> Set<String> {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser.path
+        var roots = ["\(home)/.claude/projects", "\(home)/.config/claude/projects"]
+        if let configured = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"] {
+            roots += configured.split(separator: ",").map { "\($0)/projects" }
+        }
+        let cutoff = dayFormatter().date(from: day) ?? .distantPast
+        var paths = Set<String>()
+        for root in Set(roots.map { ($0 as NSString).standardizingPath }) {
+            guard let enumerator = fm.enumerator(
+                at: URL(fileURLWithPath: root),
+                includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey]
+            ) else { continue }
+            for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+                let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
+                guard values?.isRegularFile == true,
+                      (values?.contentModificationDate ?? .distantPast) >= cutoff else { continue }
+                paths.insert(url.path)
+            }
+        }
+        return paths
+    }
+
+    /// Transcripts are append-only, so only the bytes after the last complete line are parsed.
+    private static func update(_ path: String) {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return }
+        defer { try? handle.close() }
+        var state = files[path] ?? FileState()
+        let size = (try? handle.seekToEnd()) ?? 0
+        if size < state.offset { state = FileState() }
+        guard size > state.offset else { return }
+        do {
+            try handle.seek(toOffset: state.offset)
+        } catch {
+            return
+        }
+        guard let data = try? handle.readToEnd(),
+              let lastNewline = data.lastIndex(of: UInt8(ascii: "\n")) else { return }
+
+        var lineStart = data.startIndex
+        while lineStart <= lastNewline {
+            let lineEnd = data[lineStart...lastNewline].firstIndex(of: UInt8(ascii: "\n")) ?? lastNewline
+            let line = data[lineStart..<lineEnd]
+            if line.range(of: usageMarker) != nil, line.range(of: assistantMarker) != nil,
+               let (key, entry) = parse(line) {
+                if state.entries[key].map({ entry.output >= $0.output }) ?? true {
+                    state.entries[key] = entry
+                }
+            }
+            lineStart = lineEnd + 1
+        }
+        state.offset += UInt64(lastNewline - data.startIndex + 1)
+        files[path] = state
+    }
+
+    private static func parse(_ line: Data) -> (String, Entry)? {
+        guard let json = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
+              json["type"] as? String == "assistant",
+              let message = json["message"] as? [String: Any],
+              let usage = message["usage"] as? [String: Any],
+              let model = message["model"] as? String,
+              let timestamp = json["timestamp"] as? String,
+              let date = date(timestamp) else { return nil }
+        let messageID = message["id"] as? String
+        let requestID = json["requestId"] as? String
+        let key = messageID == nil && requestID == nil
+            ? (json["uuid"] as? String ?? UUID().uuidString)
+            : "\(messageID ?? "")|\(requestID ?? "")"
+        let creation = usage["cache_creation"] as? [String: Any]
+        let cacheWrite = int(usage["cache_creation_input_tokens"]) ?? 0
+        let cacheWrite1h = min(int(creation?["ephemeral_1h_input_tokens"]) ?? 0, cacheWrite)
+        return (key, Entry(
+            date: date,
+            model: model,
+            input: int(usage["input_tokens"]) ?? 0,
+            output: int(usage["output_tokens"]) ?? 0,
+            cacheWrite5m: cacheWrite - cacheWrite1h,
+            cacheWrite1h: cacheWrite1h,
+            cacheRead: int(usage["cache_read_input_tokens"]) ?? 0,
+            fast: usage["speed"] as? String == "fast"
+        ))
     }
 
     private static func family(_ model: String) -> String {
@@ -3209,6 +3335,15 @@ private enum LocalClaudeUsage {
         return model.uppercased()
     }
 
+    private static func dayFormatter() -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .iso8601)
+        formatter.timeZone = .current
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }
+
     private static func dateKeys() -> (today: String, weekStart: String, monthStart: String) {
         let now = Date()
         var calendar = Calendar(identifier: .iso8601)
@@ -3216,17 +3351,24 @@ private enum LocalClaudeUsage {
         let today = calendar.startOfDay(for: now)
         let weekStart = calendar.dateInterval(of: .weekOfYear, for: now)?.start ?? today
         let monthStart = calendar.dateInterval(of: .month, for: now)?.start ?? today
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .iso8601)
-        formatter.timeZone = .current
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
+        let formatter = dayFormatter()
         return (formatter.string(from: today), formatter.string(from: weekStart), formatter.string(from: monthStart))
     }
 
-    private static func double(_ value: Any?) -> Double? {
-        if let number = value as? NSNumber { return number.doubleValue }
-        if let string = value as? String { return Double(string) }
+    private static let fractionalFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private static let plainFormatter = ISO8601DateFormatter()
+
+    private static func date(_ value: String) -> Date? {
+        fractionalFormatter.date(from: value) ?? plainFormatter.date(from: value)
+    }
+
+    private static func int(_ value: Any?) -> Int? {
+        if let number = value as? NSNumber { return number.intValue }
+        if let string = value as? String { return Int(string) }
         return nil
     }
 }
