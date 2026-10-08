@@ -1590,9 +1590,13 @@ private final class AccountCardView: NSView {
         name.textColor = Theme.primaryText
         if isActive {
             // The account Claude is signed into; the menu bar shows its percentages.
-            let title = NSMutableAttributedString(string: "● ", attributes: [.foregroundColor: Theme.accent, .font: NSFont.systemFont(ofSize: 9, weight: .bold)])
-            title.append(NSAttributedString(string: compactName(card.name), attributes: [.foregroundColor: Theme.primaryText, .font: NSFont.systemFont(ofSize: 12.5, weight: .semibold)]))
+            // An attributed value drops the label's line break mode, so it is set again here.
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineBreakMode = .byTruncatingMiddle
+            let title = NSMutableAttributedString(string: "● ", attributes: [.foregroundColor: Theme.accent, .font: NSFont.systemFont(ofSize: 9, weight: .bold), .paragraphStyle: paragraph])
+            title.append(NSAttributedString(string: compactName(card.name), attributes: [.foregroundColor: Theme.primaryText, .font: NSFont.systemFont(ofSize: 12.5, weight: .semibold), .paragraphStyle: paragraph]))
             name.attributedStringValue = title
+            name.maximumNumberOfLines = 1
             name.toolTip = L.text("Active claude.ai account", "Aktif claude.ai hesabı")
         }
         name.lineBreakMode = .byTruncatingMiddle
@@ -2966,7 +2970,7 @@ private final class QuotaAPI {
                         weeklyPercent: nil, weeklyResetSeconds: nil,
                         resetCreditsAvailableCount: nil, resetCreditExpiries: [],
                         allowed: nil, limitReached: nil, updatedAt: Date(),
-                        headline: plan,
+                        headline: "\(plan) · Proxy",
                         stale: true,
                         note: rateLimited
                             ? L.text("Quota unavailable (rate limit), retrying later", "Kota alınamadı (rate limit), sonra tekrar denenecek")
@@ -2989,7 +2993,7 @@ private final class QuotaAPI {
                         limitReached: quota.limitReached,
                         updatedAt: Date(),
                         weeklyLabel: quota.weeklyLabel,
-                        headline: plan,
+                        headline: "\(plan) · Proxy",
                         subline: quota.weeklyResetDate.map(ClaudeAPI.formatDate) ?? "--"
                     )
                     Self.claudeCacheLock.lock()
