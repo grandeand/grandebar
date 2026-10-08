@@ -165,6 +165,36 @@ enum ClaudeSessionEnvironment {
     }
 }
 
+/// Code sessions Claude Desktop is running, from Claude Code's own `sessions/<pid>.json`
+/// records. Quitting Desktop stops all of them, so the restart dialogs list them first.
+struct DesktopCodeActivity: Equatable {
+    var working: [String] = []
+    var waiting: [String] = []
+    var idle = 0
+
+    var needsAttention: Bool { !working.isEmpty || !waiting.isEmpty }
+
+    static func current(configDir: URL) -> DesktopCodeActivity {
+        var activity = DesktopCodeActivity()
+        let dir = configDir.appendingPathComponent("sessions")
+        for name in ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).sorted() where name.hasSuffix(".json") {
+            guard let data = try? Data(contentsOf: dir.appendingPathComponent(name)),
+                  let record = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let pid = (record["pid"] as? NSNumber)?.int32Value, pid > 0,
+                  ((record["entrypoint"] as? String) ?? "").hasPrefix("claude-desktop"),
+                  kill(pid, 0) == 0 || errno == EPERM else { continue }
+            let named = (record["name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let title = named ?? (record["cwd"] as? String).map { ($0 as NSString).lastPathComponent } ?? "Code"
+            switch record["status"] as? String {
+            case "busy", "shell": activity.working.append(title)
+            case "waiting": activity.waiting.append(title)
+            default: activity.idle += 1
+            }
+        }
+        return activity
+    }
+}
+
 /// Used for sandboxed dry runs, so they never quit or launch the real app.
 struct DetachedDesktopApp: DesktopAppControl {
     var isRunning: Bool { false }
@@ -182,6 +212,7 @@ final class ClaudeDesktopAccounts {
     static let bridgeFile = "bridge-state.json"
     private static let backupsToKeep = 5
     private static let quitTimeout: TimeInterval = 25
+    static let loginTimeout: TimeInterval = 300
 
     let dataDir: URL
     let storeDir: URL
@@ -391,7 +422,7 @@ final class ClaudeDesktopAccounts {
     }
 
     /// Polls config.json until Desktop has written a new login. Blocking.
-    func waitForLogin(timeout: TimeInterval = 300, pollInterval: TimeInterval = 2) throws -> String {
+    func waitForLogin(timeout: TimeInterval = loginTimeout, pollInterval: TimeInterval = 2) throws -> String {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if isCancelled() { throw DesktopAccountError.loginCancelled }

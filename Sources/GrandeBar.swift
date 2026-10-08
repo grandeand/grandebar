@@ -3595,6 +3595,21 @@ private enum ClaudeProviderSwitcher {
         return (oauth["emailAddress"] as? String).map { ($0, "Code") }
     }
 
+    static func desktopCodeActivity() -> DesktopCodeActivity {
+        var dirs = [home + "/.claude"]
+        if let configured = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"] {
+            dirs += configured.split(separator: ",").map(String.init)
+        }
+        var total = DesktopCodeActivity()
+        for dir in Set(dirs.map { ($0 as NSString).standardizingPath }) {
+            let activity = DesktopCodeActivity.current(configDir: URL(fileURLWithPath: dir))
+            total.working += activity.working
+            total.waiting += activity.waiting
+            total.idle += activity.idle
+        }
+        return total
+    }
+
     /// Mirrors Code sessions while Desktop is closed, so it opens with the full list.
     static func syncSessionsIfShared() {
         if ClaudeSessionSharing.isEnabled { sessionSharing.sync() }
@@ -3929,6 +3944,99 @@ private final class RouteChipView: NSView {
     }
 }
 
+/// Stays on top while GrandeBar waits for the new Desktop sign-in, with a countdown and Cancel.
+private final class LoginWaitPanel: NSPanel, NSWindowDelegate {
+    private let heading = NSTextField(labelWithString: "")
+    private let body = NSTextField(wrappingLabelWithString: "")
+    private let countdown = NSTextField(labelWithString: "")
+    private let spinner = NSProgressIndicator()
+    private let cancelButton = NSButton()
+    private let onCancel: () -> Void
+    private let deadline: Date
+    private var timer: Timer?
+    private var finished = false
+
+    init(alias: String?, timeout: TimeInterval, onCancel: @escaping () -> Void) {
+        self.onCancel = onCancel
+        deadline = Date().addingTimeInterval(timeout)
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 380, height: 150),
+                   styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: false)
+        title = "GrandeBar"
+        appearance = Theme.appAppearance
+        level = .floating
+        hidesOnDeactivate = false
+        isReleasedWhenClosed = false
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        delegate = self
+
+        let name = alias ?? L.text("a new account", "yeni hesap")
+        heading.stringValue = L.text("Waiting for Claude Desktop sign-in", "Claude Desktop girişi bekleniyor")
+        heading.font = .systemFont(ofSize: 13, weight: .semibold)
+        body.stringValue = L.text(
+            "Sign in to Claude Desktop with the account to save as \(name). Cancel brings the previous account back.",
+            "Claude Desktop'ta \(name) olarak kaydedilecek hesapla giriş yap. İptal edersen önceki hesap geri gelir."
+        )
+        body.font = .systemFont(ofSize: 12)
+        body.textColor = .secondaryLabelColor
+        countdown.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        cancelButton.title = L.text("Cancel Sign-in", "Girişi iptal et")
+        cancelButton.bezelStyle = .rounded
+        cancelButton.target = self
+        cancelButton.action = #selector(cancelClicked)
+
+        spinner.frame = NSRect(x: 20, y: 112, width: 16, height: 16)
+        heading.frame = NSRect(x: 44, y: 110, width: 316, height: 20)
+        body.frame = NSRect(x: 20, y: 52, width: 340, height: 52)
+        countdown.frame = NSRect(x: 20, y: 18, width: 180, height: 20)
+        cancelButton.frame = NSRect(x: 220, y: 12, width: 144, height: 30)
+        [spinner, heading, body, countdown, cancelButton].forEach { contentView?.addSubview($0) }
+    }
+
+    func show() {
+        center()
+        orderFrontRegardless()
+        spinner.startAnimation(nil)
+        tick()
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+    }
+
+    func showSaving() { setStatus(L.text("Signed in, saving the account…", "Giriş yapıldı, hesap kaydediliyor…")) }
+
+    func showRestoring() { setStatus(L.text("Bringing the previous account back…", "Önceki hesap geri getiriliyor…")) }
+
+    func dismiss() {
+        finished = true
+        timer?.invalidate()
+        spinner.stopAnimation(nil)
+        close()
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if !finished { cancelClicked() }
+        return finished
+    }
+
+    private func setStatus(_ text: String) {
+        timer?.invalidate()
+        countdown.stringValue = text
+        countdown.frame.size.width = 340
+        cancelButton.isHidden = true
+    }
+
+    private func tick() {
+        let left = max(0, Int(deadline.timeIntervalSinceNow.rounded()))
+        countdown.stringValue = L.text("Time left \(left / 60):", "Kalan süre \(left / 60):") + String(format: "%02d", left % 60)
+    }
+
+    @objc private func cancelClicked() {
+        guard !cancelButton.isHidden else { return }
+        setStatus(L.text("Cancelling…", "İptal ediliyor…"))
+        onCancel()
+    }
+}
+
 /// Alias of the account being signed into while the add-account flow waits for Desktop.
 private enum DesktopLoginState {
     static var pendingAlias: String?
@@ -3980,15 +4088,53 @@ extension QuotaViewController {
         alert.runModal()
     }
 
-    private func confirm(_ title: String, _ info: String, button: String) -> Bool {
+    /// `restartsDesktop` puts the running-session warning first and, when Code sessions are
+    /// working or waiting, makes Return cancel instead of quitting Desktop.
+    private func confirm(_ title: String, _ info: String, button: String, restartsDesktop: Bool = false) -> Bool {
         let alert = NSAlert()
         alert.messageText = title
-        alert.informativeText = info
         alert.addButton(withTitle: button)
         alert.addButton(withTitle: L.text("Cancel", "İptal"))
+        alert.informativeText = restartsDesktop ? Self.applyRestartWarning(to: alert, info: info) : info
         alert.window.appearance = Theme.appAppearance
         NSApp.activate(ignoringOtherApps: true)
         return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// Returns `info` with the restart warning on top; styles the alert when work would be lost.
+    private static func applyRestartWarning(to alert: NSAlert, info: String) -> String {
+        guard ClaudeProviderSwitcher.desktopApp.isRunning else { return info }
+        let activity = ClaudeProviderSwitcher.desktopCodeActivity()
+        guard activity.needsAttention else {
+            let note = activity.idle > 0
+                ? L.text("Claude Desktop will quit and reopen; its \(activity.idle) idle Code session(s) will be closed.",
+                         "Claude Desktop kapatılıp yeniden açılacak; boşta duran \(activity.idle) Code oturumu kapanır.")
+                : L.text("Claude Desktop will quit and reopen.", "Claude Desktop kapatılıp yeniden açılacak.")
+            return note + "\n\n" + info
+        }
+        func list(_ names: [String]) -> String {
+            let shown = names.prefix(3).joined(separator: ", ")
+            return names.count > 3 ? shown + L.text(" and \(names.count - 3) more", " ve \(names.count - 3) tane daha") : shown
+        }
+        var lines = [L.text("⚠️ Claude Desktop will quit NOW and stop its running Code sessions:",
+                            "⚠️ Claude Desktop ŞİMDİ kapanacak ve çalışan Code oturumları duracak:")]
+        if !activity.working.isEmpty {
+            lines.append(L.text("• \(activity.working.count) working: \(list(activity.working))",
+                                "• \(activity.working.count) çalışıyor: \(list(activity.working))"))
+        }
+        if !activity.waiting.isEmpty {
+            lines.append(L.text("• \(activity.waiting.count) waiting for you: \(list(activity.waiting))",
+                                "• \(activity.waiting.count) senden yanıt bekliyor: \(list(activity.waiting))"))
+        }
+        lines.append(L.text("Their current turn is cut off. Let them finish first, or press Cancel.",
+                            "Yürüyen işleri yarıda kalır. Önce bitmelerini bekle ya da İptal'e bas."))
+        alert.alertStyle = .critical
+        if alert.buttons.count >= 2 {
+            alert.buttons[0].hasDestructiveAction = true
+            alert.buttons[0].keyEquivalent = ""
+            alert.buttons[1].keyEquivalent = "\r"
+        }
+        return lines.joined(separator: "\n") + "\n\n" + info
     }
 
     private func notify(_ title: String, _ info: String) {
@@ -3998,13 +4144,6 @@ extension QuotaViewController {
         alert.window.appearance = Theme.appAppearance
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
-    }
-
-    private static var restartNote: String {
-        L.text(
-            "Claude Desktop will quit and reopen. Open chats and Code sessions will be interrupted.",
-            "Claude Desktop kapatılıp yeniden açılacak. Açık sohbetler ve Code oturumları yarıda kalır."
-        )
     }
 
     private static func message(for error: Error) -> String {
@@ -4055,7 +4194,6 @@ extension QuotaViewController {
         let target = proxy ? "CLIProxy" : "claude.ai"
         let desktopRunning = ClaudeProviderSwitcher.desktopApp.isRunning
         var info = L.text("Claude Desktop will use \(target). Claude Code is not changed.", "Claude Desktop \(target) kullanacak. Claude Code değişmez.")
-        if desktopRunning { info += "\n\n" + Self.restartNote }
         if proxy {
             info += "\n\n" + L.text(
                 "In CLIProxy mode Claude Desktop keeps a separate local chat history; claude.ai chats return when you switch back.",
@@ -4063,7 +4201,7 @@ extension QuotaViewController {
             )
         }
         let button = desktopRunning ? L.text("Apply and Restart", "Uygula ve yeniden başlat") : L.text("Apply", "Uygula")
-        guard confirm(L.text("Switch Claude Desktop to \(target)", "Claude Desktop'u \(target) moduna geçir"), info, button: button) else { return }
+        guard confirm(L.text("Switch Claude Desktop to \(target)", "Claude Desktop'u \(target) moduna geçir"), info, button: button, restartsDesktop: true) else { return }
 
         DispatchQueue.global(qos: .userInitiated).async {
             var failure: Error?
@@ -4155,11 +4293,10 @@ extension QuotaViewController {
     @objc private func desktopAccountChosen(_ sender: NSMenuItem) {
         guard let alias = sender.representedObject as? String,
               alias != ClaudeProviderSwitcher.desktopAccounts.activeAlias() else { return }
-        let info = Self.restartNote + "\n\n" + L.text(
-            "Code tab sessions are listed per account.",
-            "Code sekmesindeki oturumlar hesaba göre listelenir."
-        )
-        guard confirm(L.text("Switch Claude Desktop to \(alias)", "Claude Desktop'u \(alias) hesabına geçir"), info, button: L.text("Switch", "Geçiş yap")) else { return }
+        let info = ClaudeSessionSharing.isEnabled
+            ? L.text("Code-tab sessions are shared, so they show up in \(alias) too.", "Code oturumları ortak; \(alias) hesabında da görünür.")
+            : L.text("Code-tab sessions are listed per account.", "Code sekmesindeki oturumlar hesaba göre listelenir.")
+        guard confirm(L.text("Switch Claude Desktop to \(alias)", "Claude Desktop'u \(alias) hesabına geçir"), info, button: L.text("Switch", "Geçiş yap"), restartsDesktop: true) else { return }
 
         DispatchQueue.global(qos: .userInitiated).async {
             var failure: Error?
@@ -4222,19 +4359,24 @@ extension QuotaViewController {
             fields.append(PromptField(placeholder: email ?? L.text("Current account name (optional)", "Mevcut hesabın adı (isteğe bağlı)")))
         }
         var info = L.text(
-            "Claude Desktop reopens at its sign-in screen. Sign in with the new account within 5 minutes; if you cancel, the current account comes back.",
-            "Claude Desktop giriş ekranıyla yeniden açılır. Yeni hesapla 5 dakika içinde giriş yap; iptal edersen mevcut hesap geri gelir."
+            "Claude Desktop opens at its sign-in screen. Sign in with the new account within 5 minutes; cancelling brings the current account back.",
+            "Claude Desktop giriş ekranıyla açılır. Yeni hesapla 5 dakika içinde giriş yap; iptal edersen mevcut hesap geri gelir."
         )
         if unsavedLive {
-            info += "\n\n" + L.text("The current login is not saved yet, so it is saved too.", "Mevcut oturum henüz kayıtlı değil; o da kaydedilir.")
+            info += " " + L.text("The current login is saved first.", "Mevcut oturum önce kaydedilir.")
         }
-        info += "\n\n" + Self.emptyNameNote + "\n\n" + Self.restartNote
-        guard let names = promptNames(L.text("Add Claude Desktop Account", "Claude Desktop hesabı ekle"), info, fields: fields) else { return }
+        info += "\n\n" + L.text("Leave a name empty to use the account's email.", "Adı boş bırakırsan hesabın e-postası kullanılır.")
+        guard let names = promptNames(L.text("Add Claude Desktop Account", "Claude Desktop hesabı ekle"), info, fields: fields,
+                                      button: L.text("Quit Desktop and Sign In", "Desktop'u kapat ve giriş yap"), restartsDesktop: true) else { return }
         let newAlias = names[0]
         let currentAlias = unsavedLive ? names[1] : nil
 
         DesktopLoginState.pendingAlias = newAlias ?? L.text("new account", "yeni hesap")
         refreshProviderCard()
+        let waitPanel = LoginWaitPanel(alias: newAlias, timeout: ClaudeDesktopAccounts.loginTimeout) {
+            ClaudeProviderSwitcher.desktopAccounts.cancelPendingLogin()
+        }
+        func closeWaitPanel() { DispatchQueue.main.async { waitPanel.dismiss() } }
         DispatchQueue.global(qos: .userInitiated).async {
             let rollback: DesktopSessionCopy?
             do {
@@ -4246,14 +4388,17 @@ extension QuotaViewController {
                 }
                 return
             }
+            DispatchQueue.main.async { waitPanel.show() }
             do {
                 let uuid = try store.waitForLogin()
+                DispatchQueue.main.async { waitPanel.showSaving() }
                 let result = try store.finishLogin(newAlias: newAlias, accountUUID: uuid)
                 // Desktop loaded the new account's empty session list; restart once so it shows the shared sessions.
                 var restarted = false
                 if ClaudeSessionSharing.isEnabled, case .added = result, store.waitForSessionFolder(accountUUID: uuid) {
                     restarted = (try? store.restartDesktop(whileClosed: ClaudeProviderSwitcher.syncSessionsIfShared)) != nil
                 }
+                closeWaitPanel()
                 DispatchQueue.main.async {
                     DesktopLoginState.pendingAlias = nil
                     self.refreshProviderCard()
@@ -4269,12 +4414,14 @@ extension QuotaViewController {
                     }
                 }
             } catch {
+                DispatchQueue.main.async { waitPanel.showRestoring() }
                 var failure: Error = error
                 do {
                     try store.abortLogin(rollback: rollback)
                 } catch {
                     failure = error
                 }
+                closeWaitPanel()
                 DispatchQueue.main.async {
                     DesktopLoginState.pendingAlias = nil
                     if case DesktopAccountError.loginCancelled = failure {
@@ -4363,25 +4510,26 @@ extension QuotaViewController {
     }
 
     /// Asks for one name per field; an empty field comes back as nil. Nil when cancelled.
-    private func promptNames(_ title: String, _ info: String, fields: [PromptField]) -> [String?]? {
+    private func promptNames(_ title: String, _ info: String, fields: [PromptField],
+                             button: String = L.text("Continue", "Devam"), restartsDesktop: Bool = false) -> [String?]? {
         let alert = NSAlert()
         alert.messageText = title
-        alert.informativeText = info
-        alert.addButton(withTitle: L.text("Continue", "Devam"))
+        alert.addButton(withTitle: button)
         alert.addButton(withTitle: L.text("Cancel", "İptal"))
-        let inputs = fields.map { spec -> NSTextField in
-            let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 22))
+        alert.informativeText = restartsDesktop ? Self.applyRestartWarning(to: alert, info: info) : info
+        // Plain frames: NSAlert lays its accessory view out with frames, not Auto Layout.
+        let width: CGFloat = 260, rowHeight: CGFloat = 24, spacing: CGFloat = 8
+        let height = CGFloat(fields.count) * rowHeight + CGFloat(max(0, fields.count - 1)) * spacing
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        let inputs = fields.enumerated().map { index, spec -> NSTextField in
+            let y = height - CGFloat(index + 1) * rowHeight - CGFloat(index) * spacing
+            let field = NSTextField(frame: NSRect(x: 0, y: y, width: width, height: rowHeight))
             field.placeholderString = spec.placeholder
             field.stringValue = spec.value
-            field.translatesAutoresizingMaskIntoConstraints = false
-            field.widthAnchor.constraint(equalToConstant: 260).isActive = true
+            container.addSubview(field)
             return field
         }
-        let stack = NSStackView(views: inputs)
-        stack.orientation = .vertical
-        stack.spacing = 8
-        stack.frame = NSRect(x: 0, y: 0, width: 260, height: CGFloat(inputs.count) * 30 - 8)
-        alert.accessoryView = stack
+        alert.accessoryView = container
         alert.window.appearance = Theme.appAppearance
         alert.window.initialFirstResponder = inputs.first
         NSApp.activate(ignoringOtherApps: true)
