@@ -480,6 +480,9 @@ final class QuotaViewController: NSViewController {
     private var lastWarmNewCount: Int?
     private var warmNewClearWorkItem: DispatchWorkItem?
     private var latestCards: [QuotaCard] = []
+    /// Claude Desktop's live account when CLIProxy does not report it; outside the pool totals.
+    private var desktopCard: (uuid: String, card: QuotaCard)?
+    private var desktopFetchInFlight = false
     private var latestUsage: LocalUsage?
 
     init(statusUpdate: @escaping (String, String) -> Void) {
@@ -685,6 +688,7 @@ final class QuotaViewController: NSViewController {
                 case .failure(let error):
                     self.renderError(error.localizedDescription)
                 }
+                self.refreshDesktopUsage()
             }
         }
     }
@@ -1183,7 +1187,7 @@ final class QuotaViewController: NSViewController {
         stackView.addArrangedSubview(totalView)
         totalView.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
 
-        let accounts = AccountsGroupView(cards: cards.sorted(by: sortCards), activeName: mode == .claude ? activeClaudeCard(in: cards)?.card.name : nil)
+        let accounts = AccountsGroupView(cards: displayCards(cards), activeName: mode == .claude ? activeClaudeCard(in: cards)?.card.name : nil)
         stackView.addArrangedSubview(accounts)
         accounts.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
         resizeDocument()
@@ -1387,7 +1391,7 @@ final class QuotaViewController: NSViewController {
     /// Claude mode shows the account Claude is signed into on claude.ai; through CLIProxy (or for
     /// an account GrandeBar has no quota for) it shows the whole pool, as Codex mode does.
     private func updateStatusItem(cards: [QuotaCard], summary: TotalLimitSummary) {
-        let lines = cards.map { "\($0.name): \($0.sessionPercent.map(String.init) ?? "--")% session, \($0.weeklyPercent.map(String.init) ?? "--")% weekly" }
+        let lines = displayCards(cards).map { "\($0.name): \($0.sessionPercent.map(String.init) ?? "--")% session, \($0.weeklyPercent.map(String.init) ?? "--")% weekly" }
         if AppConfig.mode() == .claude, let active = activeClaudeCard(in: cards) {
             let session = active.card.weeklyPercent == 0 ? 0 : active.card.sessionPercent
             let title = "\(paddedMenuBarPercent(session.map { "\($0)%" } ?? "--%"))\n\(paddedMenuBarPercent(active.card.weeklyPercent.map { "\($0)%" } ?? "--%"))"
@@ -1401,6 +1405,9 @@ final class QuotaViewController: NSViewController {
 
     /// Nil (pool total) when the account is unknown or GrandeBar has no quota for it yet.
     private func activeClaudeCard(in cards: [QuotaCard]) -> (card: QuotaCard, client: String)? {
+        if let desktop = currentDesktopCard, desktop.sessionPercent != nil || desktop.weeklyPercent != nil {
+            return (desktop, "Desktop")
+        }
         guard let active = ClaudeProviderSwitcher.activeOfficialAccount(),
               let card = cards.first(where: { $0.name.lowercased() == active.email.lowercased() }),
               card.sessionPercent != nil || card.weeklyPercent != nil else { return nil }
@@ -3255,6 +3262,154 @@ private enum ClaudeAPI {
     }
 }
 
+/// Quota of the account Claude Desktop is signed into, asked with Desktop's own token, so an
+/// account that is not in CLIProxy still shows up (the way Desktop's own usage screen does).
+private enum DesktopUsage {
+    private enum SecretState { case unknown, granted(Data), denied(OSStatus) }
+    private static let lock = NSLock()
+    private static var secretState = SecretState.unknown
+    private static var profiles: [String: (plan: String, email: String?)] = [:]
+    private static var lastCards: [String: QuotaCard] = [:]
+    private static var lastAttempt: [String: Date] = [:]
+    private static let minimumInterval: TimeInterval = 60
+
+    /// Nil when the account is not Desktop's live one any more. At most one request a minute per
+    /// account, like the rest of the usage calls. Blocking; runs off the main thread.
+    static func fetch(accountUUID: String, fallbackName: String) -> QuotaCard? {
+        lock.lock()
+        if let last = lastAttempt[accountUUID], Date().timeIntervalSince(last) < minimumInterval {
+            let cached = lastCards[accountUUID]
+            lock.unlock()
+            return cached
+        }
+        lastAttempt[accountUUID] = Date()
+        lock.unlock()
+
+        let accounts = ClaudeProviderSwitcher.desktopAccounts
+        let token: String
+        do {
+            token = try ClaudeDesktopToken.read(dataDir: accounts.dataDir, secret: secret)
+        } catch {
+            return noteCard(accountUUID: accountUUID, name: fallbackName, note: message(for: error))
+        }
+        // Desktop may have switched account while the Keychain prompt was up.
+        guard accounts.liveAccountUUID() == accountUUID else { return nil }
+
+        lock.lock()
+        var profile = profiles[accountUUID]
+        lock.unlock()
+        if profile == nil, case .success(let body) = request(ClaudeAPI.profileURL, token: token) {
+            let account = body["account"] as? [String: Any] ?? [:]
+            let email = (account["email"] as? String) ?? (account["email_address"] as? String)
+            if let uuid = account["uuid"] as? String, uuid != accountUUID { return nil }
+            if let email { accounts.recordEmail(email, for: accountUUID) }
+            profile = (ClaudeAPI.planLabel(body), email)
+            lock.lock()
+            profiles[accountUUID] = profile
+            lock.unlock()
+        }
+        let plan = profile?.plan ?? "Claude"
+        let name = profile?.email ?? fallbackName
+
+        switch request(ClaudeAPI.usageURL, token: token) {
+        case .success(let usage):
+            let quota = ClaudeQuota.parse(usage)
+            let card = QuotaCard(
+                name: name, plan: plan,
+                sessionPercent: quota.sessionRemaining, sessionResetSeconds: quota.sessionResetSeconds,
+                weeklyPercent: quota.weeklyRemaining, weeklyResetSeconds: quota.weeklyResetSeconds,
+                resetCreditsAvailableCount: nil, resetCreditExpiries: [],
+                allowed: nil, limitReached: quota.limitReached, updatedAt: Date(),
+                weeklyLabel: quota.weeklyLabel,
+                headline: "\(plan) · Desktop",
+                subline: quota.weeklyResetDate.map(ClaudeAPI.formatDate) ?? "--"
+            )
+            lock.lock()
+            lastCards[accountUUID] = card
+            lock.unlock()
+            return card
+        case .failure(let error):
+            lock.lock()
+            let cached = lastCards[accountUUID]
+            lock.unlock()
+            if var cached {
+                cached.stale = true
+                return cached
+            }
+            return noteCard(accountUUID: accountUUID, name: name, note: ClaudeAPI.friendlyError(error).localizedDescription)
+        }
+    }
+
+    /// Asks the Keychain once per launch; a denial is not asked again until GrandeBar restarts.
+    private static func secret() throws -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        switch secretState {
+        case .granted(let data): return data
+        case .denied(let status): throw ClaudeDesktopTokenError.keychain(status)
+        case .unknown:
+            do {
+                let data = try ClaudeDesktopToken.keychainSecret()
+                secretState = .granted(data)
+                return data
+            } catch ClaudeDesktopTokenError.keychain(let status) {
+                secretState = .denied(status)
+                throw ClaudeDesktopTokenError.keychain(status)
+            }
+        }
+    }
+
+    private static func request(_ url: String, token: String) -> Result<[String: Any], Error> {
+        guard let url = URL(string: url) else { return .failure(URLError(.badURL)) }
+        var request = URLRequest(url: url, timeoutInterval: 15)
+        for (key, value) in ClaudeAPI.headers {
+            request.setValue(value.replacingOccurrences(of: "$TOKEN$", with: token), forHTTPHeaderField: key)
+        }
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: Result<[String: Any], Error> = .failure(URLError(.timedOut))
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            defer { semaphore.signal() }
+            if let error { result = .failure(error); return }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let body = data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] } ?? [:]
+            guard (200..<300).contains(status) else {
+                let text = data.flatMap { String(data: $0, encoding: .utf8) } ?? "HTTP \(status)"
+                result = .failure(NSError(domain: "GrandeBar", code: status, userInfo: [NSLocalizedDescriptionKey: text]))
+                return
+            }
+            result = .success(body)
+        }.resume()
+        _ = semaphore.wait(timeout: .now() + 20)
+        return result
+    }
+
+    private static func noteCard(accountUUID: String, name: String, note: String) -> QuotaCard {
+        QuotaCard(
+            name: name, plan: "Desktop",
+            sessionPercent: nil, sessionResetSeconds: nil, weeklyPercent: nil, weeklyResetSeconds: nil,
+            resetCreditsAvailableCount: nil, resetCreditExpiries: [],
+            allowed: nil, limitReached: nil, updatedAt: Date(),
+            headline: "Desktop", stale: true, note: note
+        )
+    }
+
+    private static func message(for error: Error) -> String {
+        switch error as? ClaudeDesktopTokenError {
+        case .keychain(let status) where status == errSecUserCanceled || status == errSecAuthFailed:
+            return L.text("Keychain access to Claude Safe Storage was denied; reopen GrandeBar to be asked again",
+                          "Claude Safe Storage için Keychain izni verilmedi; GrandeBar'ı yeniden açınca tekrar sorulur")
+        case .keychain:
+            return L.text("Claude Desktop's Keychain key was not found", "Claude Desktop'ın Keychain anahtarı bulunamadı")
+        case .expired:
+            return L.text("Desktop's login token expired; it renews when Desktop runs", "Desktop'ın giriş token'ı süresi dolmuş; Desktop açıkken yenilenir")
+        case .noTokenCache:
+            return L.text("Claude Desktop is not signed in", "Claude Desktop'ta oturum açık değil")
+        default:
+            return L.text("Desktop's login could not be read", "Desktop'ın girişi okunamadı")
+        }
+    }
+}
+
 /// Remaining percentages from `/api/oauth/usage`. Prefers the `limits` array (percent = used)
 /// and falls back to the per-window fields (utilization = used).
 private struct ClaudeQuota {
@@ -4062,6 +4217,55 @@ extension QuotaViewController {
         stackView.insertArrangedSubview(card, at: index)
         card.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
         refreshActiveAccount()
+        refreshDesktopUsage()
+    }
+
+    /// The Desktop card, only while Desktop is on claude.ai and still signed into that account.
+    private var currentDesktopCard: QuotaCard? {
+        guard let desktopCard, ClaudeProviderSwitcher.desktopMode() == .official,
+              ClaudeProviderSwitcher.desktopAccounts.liveAccountUUID() == desktopCard.uuid else { return nil }
+        return desktopCard.card
+    }
+
+    /// CLIProxy accounts sorted, with Desktop's own account on top when CLIProxy lacks it.
+    private func displayCards(_ cards: [QuotaCard]) -> [QuotaCard] {
+        let sorted = cards.sorted(by: sortCards)
+        guard AppConfig.mode() == .claude, let desktop = currentDesktopCard else { return sorted }
+        return [desktop] + sorted
+    }
+
+    private func reportsQuota(_ cards: [QuotaCard], for email: String) -> Bool {
+        cards.contains { $0.name.lowercased() == email.lowercased() && ($0.sessionPercent != nil || $0.weeklyPercent != nil) }
+    }
+
+    /// Reads the live Desktop account's quota with Desktop's own token when CLIProxy lacks it.
+    private func refreshDesktopUsage() {
+        guard AppConfig.mode() == .claude, !desktopFetchInFlight else { return }
+        let accounts = ClaudeProviderSwitcher.desktopAccounts
+        guard ClaudeProviderSwitcher.desktopMode() == .official, accounts.liveIsSignedIn(),
+              let uuid = accounts.liveAccountUUID(),
+              !(accounts.email(for: uuid).map { reportsQuota(latestCards, for: $0) } ?? false) else {
+            if desktopCard != nil {
+                desktopCard = nil
+                refreshActiveAccount()
+            }
+            return
+        }
+        let fallbackName = accounts.activeAlias() ?? "Claude Desktop"
+        desktopFetchInFlight = true
+        DispatchQueue.global(qos: .utility).async {
+            let card = DesktopUsage.fetch(accountUUID: uuid, fallbackName: fallbackName)
+            DispatchQueue.main.async {
+                self.desktopFetchInFlight = false
+                // The profile can reveal that CLIProxy has this account after all.
+                if let card, !self.reportsQuota(self.latestCards, for: card.name) {
+                    self.desktopCard = (uuid, card)
+                } else {
+                    self.desktopCard = nil
+                }
+                self.refreshActiveAccount()
+            }
+        }
     }
 
     /// After a route or account change: the status item and the active-row mark follow it.
@@ -4072,7 +4276,7 @@ extension QuotaViewController {
         let old = stackView.arrangedSubviews[index]
         stackView.removeArrangedSubview(old)
         old.removeFromSuperview()
-        let accounts = AccountsGroupView(cards: latestCards.sorted(by: sortCards), activeName: activeClaudeCard(in: latestCards)?.card.name)
+        let accounts = AccountsGroupView(cards: displayCards(latestCards), activeName: activeClaudeCard(in: latestCards)?.card.name)
         stackView.insertArrangedSubview(accounts, at: index)
         accounts.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
     }
