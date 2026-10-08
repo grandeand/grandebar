@@ -563,7 +563,7 @@ final class QuotaViewController: NSViewController {
         scrollView.borderType = .noBorder
         scrollView.documentView = stackView
 
-        let footerTitle = NSTextField(labelWithString: "ccusage")
+        let footerTitle = NSTextField(labelWithString: L.text("Cost", "Maliyet"))
         footerTitle.font = .systemFont(ofSize: 10, weight: .regular)
         footerTitle.textColor = Theme.mutedText
         footerTitle.translatesAutoresizingMaskIntoConstraints = false
@@ -580,7 +580,7 @@ final class QuotaViewController: NSViewController {
         usageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         copyButton = footerIconButton("doc.on.doc", action: #selector(copyUsageTable))
-        copyButton.toolTip = L.text("Copy ccusage summary", "ccusage özetini kopyala")
+        copyButton.toolTip = L.text("Copy usage summary", "Kullanım özetini kopyala")
 
         [iconTile, title, subtitleLabel, warmButton, refreshButton, openButton, modeTabs, scrollView,
          footerTitle, usageLabel, copyButton].forEach(root.addSubview)
@@ -816,7 +816,7 @@ final class QuotaViewController: NSViewController {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { [weak self] in
             self?.copyButton.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)?
                 .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10.8, weight: .regular))
-            self?.copyButton.toolTip = L.text("Copy ccusage summary", "ccusage özetini kopyala")
+            self?.copyButton.toolTip = L.text("Copy usage summary", "Kullanım özetini kopyala")
         }
     }
 
