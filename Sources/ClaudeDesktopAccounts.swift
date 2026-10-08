@@ -51,6 +51,8 @@ protocol DesktopAppControl {
 
 final class ClaudeDesktopApp: DesktopAppControl {
     static let bundleID = "com.anthropic.claudefordesktop"
+    private let codeBinariesPath = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Application Support/Claude/claude-code").path + "/"
 
     private var running: NSRunningApplication? {
         NSRunningApplication.runningApplications(withBundleIdentifier: Self.bundleID).first
@@ -58,24 +60,61 @@ final class ClaudeDesktopApp: DesktopAppControl {
 
     var isRunning: Bool { running != nil }
 
+    /// A mode or account change only takes effect on a full restart: Code sessions inherit their
+    /// env at spawn, so leftover session processes would keep the previous mode.
     func quitAndWait(timeout: TimeInterval) -> Bool {
-        guard let app = running else { return true }
-        app.terminate()
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if app.isTerminated || running == nil {
-                // Helper processes outlive the main one briefly; let them drop the LevelDB locks.
-                Thread.sleep(forTimeInterval: 1.5)
-                return true
+        if let app = running {
+            app.terminate()
+            let deadline = Date().addingTimeInterval(timeout)
+            while !app.isTerminated && running != nil && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.5)
             }
-            Thread.sleep(forTimeInterval: 0.5)
+            guard running == nil else { return false }
         }
-        return running == nil
+        if waitForLeftovers(seconds: 10) { return true }
+        for signal in [SIGTERM, SIGKILL] {
+            leftoverProcessIDs().forEach { kill($0, signal) }
+            if waitForLeftovers(seconds: 5) { return true }
+        }
+        return false
     }
 
     func launch() {
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.bundleID) else { return }
         NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+    }
+
+    /// Helpers waiting on LevelDB locks also count.
+    private func waitForLeftovers(seconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if leftoverProcessIDs().isEmpty { return true }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        return leftoverProcessIDs().isEmpty
+    }
+
+    /// Processes from the app bundle (minus the Chrome native-messaging host, which Chrome owns)
+    /// and the Code session binaries Desktop installs under its data directory.
+    private func leftoverProcessIDs() -> [pid_t] {
+        guard let bundle = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.bundleID)?.path else { return [] }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-Ao", "pid=,comm="]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return [] }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let own = getpid()
+        return String(decoding: data, as: UTF8.self).split(separator: "\n").compactMap { line in
+            let parts = line.trimmingCharacters(in: .whitespaces).split(separator: " ", maxSplits: 1)
+            guard parts.count == 2, let pid = pid_t(parts[0]), pid != own else { return nil }
+            let path = String(parts[1])
+            let fromBundle = path.hasPrefix(bundle + "/Contents/") && !path.hasSuffix("/chrome-native-host")
+            return fromBundle || path.hasPrefix(codeBinariesPath) ? pid : nil
+        }
     }
 }
 

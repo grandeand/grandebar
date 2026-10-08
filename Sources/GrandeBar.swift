@@ -3513,7 +3513,7 @@ private enum ProviderMode {
 private enum ClaudeProviderSwitcher {
     static let profileID = "4c1b2a10-5e1d-4000-8000-00000c11b0a1"
     static let profileName = "GrandeBar CLIProxy"
-    private static let gatewayKeys = ["inferenceGatewayApiKey", "inferenceGatewayAuthScheme", "inferenceGatewayBaseUrl", "inferenceProvider", "disableDeploymentModeChooser"]
+    private static let gatewayKeys = ["inferenceGatewayApiKey", "inferenceGatewayAuthScheme", "inferenceGatewayBaseUrl", "inferenceProvider", "disableDeploymentModeChooser", "toolSearchEnabled"]
 
     // GRANDEBAR_CLAUDE_HOME redirects every write to a sandbox directory for dry runs.
     private static var sandboxHome: String? { ProcessInfo.processInfo.environment["GRANDEBAR_CLAUDE_HOME"] }
@@ -3584,6 +3584,9 @@ private enum ClaudeProviderSwitcher {
                 profile["inferenceGatewayAuthScheme"] = "bearer"
                 profile["inferenceGatewayBaseUrl"] = proxyBase
                 profile["inferenceProvider"] = "gateway"
+                // Without it 3p Code sessions get CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1, which
+                // turns MCP tool search off and loads every MCP schema up front.
+                profile["toolSearchEnabled"] = true
             }
             try patch(metaFile) { meta in
                 var entries = meta["entries"] as? [[String: Any]] ?? []
