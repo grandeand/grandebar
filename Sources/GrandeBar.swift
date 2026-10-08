@@ -166,7 +166,7 @@ private enum UI {
     static let popoverWidth: CGFloat = 325
     static let popoverHeight: CGFloat = 507
     static let modeRowHeight: CGFloat = 26
-    static let providerCardHeight: CGFloat = 66
+    static let providerCardHeight: CGFloat = 92
     static let cardWidth: CGFloat = 301
     static let accountCardHeight: CGFloat = 106
     static let summaryCardHeight: CGFloat = 104
@@ -362,7 +362,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         menu.addItem(.separator())
         menu.addItem(withTitle: L.text("Quit", "Çık"), action: #selector(quit), keyEquivalent: "q")
         menu.items.forEach { $0.target = self }
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: button.bounds.height + 4), in: button)
+        // Attached for one click so AppKit places it like any menu bar menu.
+        statusItem.menu = menu
+        button.performClick(nil)
+        statusItem.menu = nil
     }
 
     @objc private func refresh() {
@@ -862,9 +865,14 @@ final class QuotaViewController: NSViewController {
             action: nil
         )
         shareSessions.state = ClaudeSessionSharing.isEnabled ? .on : .off
-        let shareSessionsInfo = NSTextField(wrappingLabelWithString: QuotaViewController.sessionSharingInfo)
+        let shareSessionsInfo = NSTextField(wrappingLabelWithString: L.text(
+            "Every Claude Desktop account and the CLIProxy profile list the same Code-tab sessions; a deleted session is deleted everywhere. Chat and Cowork stay per account.",
+            "Tüm Claude Desktop hesapları ve CLIProxy profili aynı Code oturumlarını listeler; silinen oturum her yerden silinir. Chat ve Cowork hesaba özel kalır."
+        ))
         shareSessionsInfo.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         shareSessionsInfo.textColor = .secondaryLabelColor
+        shareSessionsInfo.preferredMaxLayoutWidth = 322
+        let shareInfoHeight = ceil(shareSessionsInfo.fittingSize.height)
         baseField.placeholderString = "https://ai.example.com"
         keyField.placeholderString = L.text("Management key", "Management key")
         claudeBaseField.placeholderString = AppConfig.claudeDefaultAPIBase
@@ -919,7 +927,7 @@ final class QuotaViewController: NSViewController {
         claudeAutomaticWarmup.frame = NSRect(x: 0, y: 122, width: 340, height: 22)
         launchAtLogin.frame = NSRect(x: 0, y: 96, width: 340, height: 22)
         shareSessions.frame = NSRect(x: 0, y: 70, width: 340, height: 22)
-        shareSessionsInfo.frame = NSRect(x: 18, y: 0, width: 322, height: 68)
+        shareSessionsInfo.frame = NSRect(x: 18, y: max(0, 68 - shareInfoHeight), width: 322, height: min(68, shareInfoHeight))
         [baseLabel, baseField, keyLabel, keyField, claudeBaseLabel, claudeBaseField, claudeKeyLabel, claudeKeyField,
          autoRefreshLabel, autoRefreshPopup, appearanceLabel, appearancePopup, languageLabel, languagePopup,
          startModeLabel, startModePopup, automaticWarmup, claudeAutomaticWarmup, launchAtLogin, shareSessions, shareSessionsInfo].forEach(settingsView.addSubview)
@@ -1391,9 +1399,12 @@ final class QuotaViewController: NSViewController {
         }
     }
 
+    /// Nil (pool total) when the account is unknown or GrandeBar has no quota for it yet.
     private func activeClaudeCard(in cards: [QuotaCard]) -> (card: QuotaCard, client: String)? {
-        guard let active = ClaudeProviderSwitcher.activeOfficialAccount() else { return nil }
-        return cards.first { $0.name.lowercased() == active.email.lowercased() }.map { ($0, active.client) }
+        guard let active = ClaudeProviderSwitcher.activeOfficialAccount(),
+              let card = cards.first(where: { $0.name.lowercased() == active.email.lowercased() }),
+              card.sessionPercent != nil || card.weeklyPercent != nil else { return nil }
+        return (card, active.client)
     }
 
     private func menuBarPoolTitle(_ summary: TotalLimitSummary) -> String {
@@ -3754,6 +3765,7 @@ private final class ProviderSwitchCardView: RoundedView {
         let code: (Bool) -> Void
         let desktopRoute: (Bool) -> Void
         let desktopAccounts: (NSView) -> Void
+        let sessionSharing: (Bool) -> Void
     }
 
     init(actions: Actions) {
@@ -3784,7 +3796,16 @@ private final class ProviderSwitchCardView: RoundedView {
             RouteChipView(text: "CLIProxy", style: desktop == .proxy ? .active : .option) { _ in actions.desktopRoute(true) }
         )
 
-        let rows = NSStackView(views: [codeRow, desktopRow])
+        let shared = ClaudeSessionSharing.isEnabled
+        let sessionsLabel = RouteChipView(text: L.text("Sessions", "Oturumlar"), style: .neutral)
+        let sessionsRow = Self.row(
+            sessionsLabel,
+            RouteChipView(text: L.text("separate", "ayrı"), style: shared ? .option : .active) { _ in actions.sessionSharing(false) },
+            RouteChipView(text: L.text("shared", "ortak"), style: shared ? .active : .option) { _ in actions.sessionSharing(true) }
+        )
+        sessionsRow.toolTip = L.text("Code-tab sessions across Claude Desktop accounts", "Hesaplar arasında Code sekmesi oturumları")
+
+        let rows = NSStackView(views: [codeRow, desktopRow, sessionsRow])
         rows.orientation = .vertical
         rows.alignment = .leading
         rows.spacing = 7
@@ -3797,6 +3818,7 @@ private final class ProviderSwitchCardView: RoundedView {
             rows.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -11),
             rows.centerYAnchor.constraint(equalTo: centerYAnchor),
             codeLabel.widthAnchor.constraint(equalTo: desktopLabel.widthAnchor),
+            sessionsLabel.widthAnchor.constraint(equalTo: desktopLabel.widthAnchor),
             accountChip.widthAnchor.constraint(lessThanOrEqualToConstant: 110)
         ])
     }
@@ -3917,7 +3939,8 @@ extension QuotaViewController {
         ProviderSwitchCardView(actions: .init(
             code: { [weak self] proxy in self?.switchClaudeCode(proxy: proxy) },
             desktopRoute: { [weak self] proxy in self?.switchDesktopRoute(proxy: proxy) },
-            desktopAccounts: { [weak self] anchor in self?.showDesktopAccountMenu(from: anchor) }
+            desktopAccounts: { [weak self] anchor in self?.showDesktopAccountMenu(from: anchor) },
+            sessionSharing: { [weak self] on in self?.setSessionSharing(on) }
         ))
     }
 
@@ -4274,7 +4297,12 @@ extension QuotaViewController {
     }
 
     @objc private func toggleSessionSharing() {
-        if ClaudeSessionSharing.isEnabled {
+        setSessionSharing(!ClaudeSessionSharing.isEnabled)
+    }
+
+    fileprivate func setSessionSharing(_ on: Bool) {
+        guard on != ClaudeSessionSharing.isEnabled else { return }
+        if !on {
             ClaudeSessionSharing.isEnabled = false
             refreshProviderCard()
             return
