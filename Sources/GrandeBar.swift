@@ -483,6 +483,7 @@ final class QuotaViewController: NSViewController {
         self.statusUpdate = statusUpdate
         super.init(nibName: nil, bundle: nil)
         updateAutoRefreshTimer()
+        ClaudeProviderSwitcher.sessionSharing.startBackgroundSync()
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
@@ -855,6 +856,15 @@ final class QuotaViewController: NSViewController {
         claudeAutomaticWarmup.state = AppConfig.automaticWarmupEnabled(for: .claude) ? .on : .off
         let launchAtLogin = NSButton(checkboxWithTitle: L.text("Launch at Login", "Girişte aç"), target: nil, action: nil)
         launchAtLogin.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        let shareSessions = NSButton(
+            checkboxWithTitle: L.text("Share Code sessions across Claude accounts", "Code oturumlarını Claude hesapları arasında paylaş"),
+            target: nil,
+            action: nil
+        )
+        shareSessions.state = ClaudeSessionSharing.isEnabled ? .on : .off
+        let shareSessionsInfo = NSTextField(wrappingLabelWithString: QuotaViewController.sessionSharingInfo)
+        shareSessionsInfo.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        shareSessionsInfo.textColor = .secondaryLabelColor
         baseField.placeholderString = "https://ai.example.com"
         keyField.placeholderString = L.text("Management key", "Management key")
         claudeBaseField.placeholderString = AppConfig.claudeDefaultAPIBase
@@ -879,7 +889,7 @@ final class QuotaViewController: NSViewController {
         }
         languagePopup.selectItem(withTitle: AppConfig.languageTitle(for: AppConfig.languageMode()))
 
-        let settingsView = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 418))
+        let settingsView = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 514))
         settingsView.appearance = Theme.appAppearance
         let baseLabel = NSTextField(labelWithString: "Codex Base URL")
         let keyLabel = NSTextField(labelWithString: L.text("Codex management key", "Codex management key"))
@@ -888,29 +898,31 @@ final class QuotaViewController: NSViewController {
         let autoRefreshLabel = NSTextField(labelWithString: L.text("Auto refresh", "Otomatik yenile"))
         let appearanceLabel = NSTextField(labelWithString: L.text("Appearance", "Görünüm"))
         let languageLabel = NSTextField(labelWithString: L.text("Language", "Dil"))
-        baseLabel.frame = NSRect(x: 0, y: 394, width: 340, height: 18)
-        baseField.frame = NSRect(x: 0, y: 366, width: 340, height: 24)
-        keyLabel.frame = NSRect(x: 0, y: 340, width: 340, height: 18)
-        keyField.frame = NSRect(x: 0, y: 312, width: 340, height: 24)
-        claudeBaseLabel.frame = NSRect(x: 0, y: 284, width: 340, height: 18)
-        claudeBaseField.frame = NSRect(x: 0, y: 256, width: 340, height: 24)
-        claudeKeyLabel.frame = NSRect(x: 0, y: 230, width: 340, height: 18)
-        claudeKeyField.frame = NSRect(x: 0, y: 202, width: 340, height: 24)
-        autoRefreshLabel.frame = NSRect(x: 0, y: 168, width: 150, height: 22)
-        autoRefreshPopup.frame = NSRect(x: 156, y: 166, width: 184, height: 26)
-        appearanceLabel.frame = NSRect(x: 0, y: 140, width: 150, height: 22)
-        appearancePopup.frame = NSRect(x: 156, y: 138, width: 184, height: 26)
-        languageLabel.frame = NSRect(x: 0, y: 112, width: 150, height: 22)
-        languagePopup.frame = NSRect(x: 156, y: 110, width: 184, height: 26)
+        baseLabel.frame = NSRect(x: 0, y: 490, width: 340, height: 18)
+        baseField.frame = NSRect(x: 0, y: 462, width: 340, height: 24)
+        keyLabel.frame = NSRect(x: 0, y: 436, width: 340, height: 18)
+        keyField.frame = NSRect(x: 0, y: 408, width: 340, height: 24)
+        claudeBaseLabel.frame = NSRect(x: 0, y: 380, width: 340, height: 18)
+        claudeBaseField.frame = NSRect(x: 0, y: 352, width: 340, height: 24)
+        claudeKeyLabel.frame = NSRect(x: 0, y: 326, width: 340, height: 18)
+        claudeKeyField.frame = NSRect(x: 0, y: 298, width: 340, height: 24)
+        autoRefreshLabel.frame = NSRect(x: 0, y: 264, width: 150, height: 22)
+        autoRefreshPopup.frame = NSRect(x: 156, y: 262, width: 184, height: 26)
+        appearanceLabel.frame = NSRect(x: 0, y: 236, width: 150, height: 22)
+        appearancePopup.frame = NSRect(x: 156, y: 234, width: 184, height: 26)
+        languageLabel.frame = NSRect(x: 0, y: 208, width: 150, height: 22)
+        languagePopup.frame = NSRect(x: 156, y: 206, width: 184, height: 26)
         let startModeLabel = NSTextField(labelWithString: L.text("Open on tab", "Açılış sekmesi"))
-        startModeLabel.frame = NSRect(x: 0, y: 84, width: 150, height: 22)
-        startModePopup.frame = NSRect(x: 156, y: 82, width: 184, height: 26)
-        automaticWarmup.frame = NSRect(x: 0, y: 52, width: 340, height: 22)
-        claudeAutomaticWarmup.frame = NSRect(x: 0, y: 26, width: 340, height: 22)
-        launchAtLogin.frame = NSRect(x: 0, y: 0, width: 340, height: 22)
+        startModeLabel.frame = NSRect(x: 0, y: 180, width: 150, height: 22)
+        startModePopup.frame = NSRect(x: 156, y: 178, width: 184, height: 26)
+        automaticWarmup.frame = NSRect(x: 0, y: 148, width: 340, height: 22)
+        claudeAutomaticWarmup.frame = NSRect(x: 0, y: 122, width: 340, height: 22)
+        launchAtLogin.frame = NSRect(x: 0, y: 96, width: 340, height: 22)
+        shareSessions.frame = NSRect(x: 0, y: 70, width: 340, height: 22)
+        shareSessionsInfo.frame = NSRect(x: 18, y: 0, width: 322, height: 68)
         [baseLabel, baseField, keyLabel, keyField, claudeBaseLabel, claudeBaseField, claudeKeyLabel, claudeKeyField,
          autoRefreshLabel, autoRefreshPopup, appearanceLabel, appearancePopup, languageLabel, languagePopup,
-         startModeLabel, startModePopup, automaticWarmup, claudeAutomaticWarmup, launchAtLogin].forEach(settingsView.addSubview)
+         startModeLabel, startModePopup, automaticWarmup, claudeAutomaticWarmup, launchAtLogin, shareSessions, shareSessionsInfo].forEach(settingsView.addSubview)
 
         let alert = NSAlert()
         alert.messageText = isInitialSetup ? L.text("GrandeBar Setup", "GrandeBar Kurulum") : L.text("GrandeBar Settings", "GrandeBar Ayarlar")
@@ -936,6 +948,11 @@ final class QuotaViewController: NSViewController {
             UserDefaults.standard.set(startModePopup.selectedItem?.representedObject as? String ?? "last", forKey: AppConfig.startModeKey)
             UserDefaults.standard.set(automaticWarmup.state == .on, forKey: AppConfig.automaticWarmupKey)
             UserDefaults.standard.set(claudeAutomaticWarmup.state == .on, forKey: AppConfig.claudeAutomaticWarmupKey)
+            let shareTurnedOn = shareSessions.state == .on && !ClaudeSessionSharing.isEnabled
+            ClaudeSessionSharing.isEnabled = shareSessions.state == .on
+            if shareTurnedOn {
+                DispatchQueue.global(qos: .utility).async { ClaudeProviderSwitcher.sessionSharing.sync() }
+            }
             UserDefaults.standard.synchronize()
             reloadViewForAppearance()
             updateAutoRefreshTimer()
@@ -1145,9 +1162,7 @@ final class QuotaViewController: NSViewController {
         setSubtitle(summaryText(for: cards))
         setDetailLine(detailText(for: cards))
         let summary = totalLimitSummary(for: cards)
-        let title = menuBarPoolTitle(summary)
-        let tooltip = cards.map { "\($0.name): \($0.sessionPercent.map(String.init) ?? "--")% session, \($0.weeklyPercent.map(String.init) ?? "--")% weekly" }.joined(separator: "\n")
-        statusUpdate(title, tooltip)
+        updateStatusItem(cards: cards, summary: summary)
 
         if mode == .claude {
             let providerView = makeProviderCard()
@@ -1160,7 +1175,7 @@ final class QuotaViewController: NSViewController {
         stackView.addArrangedSubview(totalView)
         totalView.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
 
-        let accounts = AccountsGroupView(cards: cards.sorted(by: sortCards))
+        let accounts = AccountsGroupView(cards: cards.sorted(by: sortCards), activeName: mode == .claude ? activeClaudeCard(in: cards)?.card.name : nil)
         stackView.addArrangedSubview(accounts)
         accounts.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
         resizeDocument()
@@ -1361,6 +1376,26 @@ final class QuotaViewController: NSViewController {
         return "\(Int((Double(remaining) / Double(total) * 100).rounded()))%"
     }
 
+    /// Claude mode shows the account Claude is signed into on claude.ai; through CLIProxy (or for
+    /// an account GrandeBar has no quota for) it shows the whole pool, as Codex mode does.
+    private func updateStatusItem(cards: [QuotaCard], summary: TotalLimitSummary) {
+        let lines = cards.map { "\($0.name): \($0.sessionPercent.map(String.init) ?? "--")% session, \($0.weeklyPercent.map(String.init) ?? "--")% weekly" }
+        if AppConfig.mode() == .claude, let active = activeClaudeCard(in: cards) {
+            let session = active.card.weeklyPercent == 0 ? 0 : active.card.sessionPercent
+            let title = "\(paddedMenuBarPercent(session.map { "\($0)%" } ?? "--%"))\n\(paddedMenuBarPercent(active.card.weeklyPercent.map { "\($0)%" } ?? "--%"))"
+            let header = L.text("Active: \(active.card.name) (\(active.client), claude.ai)", "Aktif: \(active.card.name) (\(active.client), claude.ai)")
+            statusUpdate(title, ([header] + lines).joined(separator: "\n"))
+        } else {
+            let header = AppConfig.mode() == .claude ? [L.text("Pool total (CLIProxy)", "Havuz toplamı (CLIProxy)")] : []
+            statusUpdate(menuBarPoolTitle(summary), (header + lines).joined(separator: "\n"))
+        }
+    }
+
+    private func activeClaudeCard(in cards: [QuotaCard]) -> (card: QuotaCard, client: String)? {
+        guard let active = ClaudeProviderSwitcher.activeOfficialAccount() else { return nil }
+        return cards.first { $0.name.lowercased() == active.email.lowercased() }.map { ($0, active.client) }
+    }
+
     private func menuBarPoolTitle(_ summary: TotalLimitSummary) -> String {
         "\(paddedMenuBarPercent(sessionPoolTitle(summary)))\n\(paddedMenuBarPercent(poolPercentText(remaining: summary.weeklyRemaining, total: summary.weeklyTotal)))"
     }
@@ -1484,7 +1519,7 @@ final class QuotaViewController: NSViewController {
 
 /// All accounts in one grouped surface, separated by hairlines.
 private final class AccountsGroupView: RoundedView {
-    init(cards: [QuotaCard]) {
+    init(cards: [QuotaCard], activeName: String? = nil) {
         super.init(color: Theme.cardBackground, radius: 10)
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -1508,7 +1543,7 @@ private final class AccountsGroupView: RoundedView {
                     hairline.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -12)
                 ])
             }
-            let row = AccountCardView(card: card)
+            let row = AccountCardView(card: card, isActive: card.name == activeName)
             stack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
@@ -1528,13 +1563,20 @@ private final class AccountsGroupView: RoundedView {
 
 /// One account row: name and chip, two quota bars, one muted footer line.
 private final class AccountCardView: NSView {
-    init(card: QuotaCard) {
+    init(card: QuotaCard, isActive: Bool = false) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
         let name = NSTextField(labelWithString: compactName(card.name))
         name.font = .systemFont(ofSize: 12.5, weight: .semibold)
         name.textColor = Theme.primaryText
+        if isActive {
+            // The account Claude is signed into; the menu bar shows its percentages.
+            let title = NSMutableAttributedString(string: "● ", attributes: [.foregroundColor: Theme.accent, .font: NSFont.systemFont(ofSize: 9, weight: .bold)])
+            title.append(NSAttributedString(string: compactName(card.name), attributes: [.foregroundColor: Theme.primaryText, .font: NSFont.systemFont(ofSize: 12.5, weight: .semibold)]))
+            name.attributedStringValue = title
+            name.toolTip = L.text("Active claude.ai account", "Aktif claude.ai hesabı")
+        }
         name.lineBreakMode = .byTruncatingMiddle
         name.translatesAutoresizingMaskIntoConstraints = false
         name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -2955,6 +2997,11 @@ private final class QuotaAPI {
                 return
             }
             let plan = ClaudeAPI.planLabel(profile)
+            let account = profile["account"] as? [String: Any] ?? [:]
+            if let uuid = account["uuid"] as? String,
+               let email = (account["email"] as? String) ?? (account["email_address"] as? String) {
+                ClaudeProviderSwitcher.desktopAccounts.recordEmail(email, for: uuid)
+            }
             Self.claudeCacheLock.lock()
             Self.claudePlans[authIndex] = plan
             Self.claudeCacheLock.unlock()
@@ -3523,6 +3570,24 @@ private enum ClaudeProviderSwitcher {
     /// Sandboxed dry runs never quit or launch the real app.
     static let desktopApp: DesktopAppControl = sandboxHome == nil ? ClaudeDesktopApp() : DetachedDesktopApp()
     static let desktopAccounts = ClaudeDesktopAccounts(home: home, app: desktopApp)
+    static let sessionSharing = ClaudeSessionSharing(home: home)
+
+    /// The claude.ai account in use: Desktop's live login while Desktop is on claude.ai, else
+    /// Claude Code's own login while Code is. Nil when Claude runs through CLIProxy.
+    static func activeOfficialAccount() -> (email: String, client: String)? {
+        if desktopMode() == .official, let uuid = desktopAccounts.liveAccountUUID() {
+            return desktopAccounts.email(for: uuid).map { ($0, "Desktop") }
+        }
+        guard codeMode() == .official else { return nil }
+        let config = readJSON(URL(fileURLWithPath: home + "/.claude.json"))
+        let oauth = config["oauthAccount"] as? [String: Any] ?? [:]
+        return (oauth["emailAddress"] as? String).map { ($0, "Code") }
+    }
+
+    /// Mirrors Code sessions while Desktop is closed, so it opens with the full list.
+    static func syncSessionsIfShared() {
+        if ClaudeSessionSharing.isEnabled { sessionSharing.sync() }
+    }
     private static var appSupport: String { home + "/Library/Application Support" }
     private static var normalConfig: URL { URL(fileURLWithPath: appSupport + "/Claude/claude_desktop_config.json") }
     private static var threePConfig: URL { URL(fileURLWithPath: appSupport + "/Claude-3p/claude_desktop_config.json") }
@@ -3865,6 +3930,20 @@ extension QuotaViewController {
         let card = makeProviderCard()
         stackView.insertArrangedSubview(card, at: index)
         card.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
+        refreshActiveAccount()
+    }
+
+    /// After a route or account change: the status item and the active-row mark follow it.
+    private func refreshActiveAccount() {
+        guard AppConfig.mode() == .claude, !latestCards.isEmpty else { return }
+        updateStatusItem(cards: latestCards, summary: totalLimitSummary(for: latestCards))
+        guard let index = stackView.arrangedSubviews.firstIndex(where: { $0 is AccountsGroupView }) else { return }
+        let old = stackView.arrangedSubviews[index]
+        stackView.removeArrangedSubview(old)
+        old.removeFromSuperview()
+        let accounts = AccountsGroupView(cards: latestCards.sorted(by: sortCards), activeName: activeClaudeCard(in: latestCards)?.card.name)
+        stackView.insertArrangedSubview(accounts, at: index)
+        accounts.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
     }
 
     private func finishProviderAction(_ failure: Error?) {
@@ -3909,7 +3988,7 @@ extension QuotaViewController {
         guard let error = error as? DesktopAccountError else { return error.localizedDescription }
         switch error {
         case .invalidAlias(let alias):
-            return L.text("\"\(alias)\" is not a valid name. Use letters, digits, dot, dash or underscore (max 40).", "\"\(alias)\" geçerli bir ad değil. Harf, rakam, nokta, tire veya alt çizgi kullan (en fazla 40).")
+            return L.text("\"\(alias)\" is not a valid name. Use letters, digits and . _ - @ + (max 64), starting with a letter or digit.", "\"\(alias)\" geçerli bir ad değil. Harf, rakam ve . _ - @ + kullan (en fazla 64), harf ya da rakamla başlasın.")
         case .aliasTaken(let alias):
             return L.text("An account named \"\(alias)\" already exists.", "\"\(alias)\" adında bir hesap zaten var.")
         case .unknownAlias(let alias):
@@ -3970,6 +4049,7 @@ extension QuotaViewController {
             if app.quitAndWait(timeout: 25) {
                 do {
                     try ClaudeProviderSwitcher.applyDesktop(proxy: proxy, apiKey: apiKey)
+                    ClaudeProviderSwitcher.syncSessionsIfShared()
                 } catch {
                     failure = error
                 }
@@ -3994,11 +4074,20 @@ extension QuotaViewController {
             menu.addItem(waiting)
             menu.addItem(menuItem(L.text("Cancel Sign-in", "Girişi iptal et"), #selector(cancelDesktopLogin)))
         } else {
+            store.backfillEmails()
             let accounts = store.accounts()
             let active = store.activeAlias()
             for account in accounts {
                 let item = menuItem(account.alias, #selector(desktopAccountChosen(_:)), represented: account.alias)
                 item.state = account.alias == active ? .on : .off
+                if let email = account.email, email != account.alias {
+                    let title = NSMutableAttributedString(string: account.alias, attributes: [.font: NSFont.menuFont(ofSize: 0)])
+                    title.append(NSAttributedString(string: "  " + email, attributes: [
+                        .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+                        .foregroundColor: NSColor.secondaryLabelColor
+                    ]))
+                    item.attributedTitle = title
+                }
                 menu.addItem(item)
             }
             if !accounts.isEmpty { menu.addItem(.separator()) }
@@ -4007,6 +4096,13 @@ extension QuotaViewController {
             }
             menu.addItem(menuItem(L.text("Add Account…", "Hesap ekle…"), #selector(addDesktopAccount)))
             if !accounts.isEmpty {
+                let rename = NSMenuItem(title: L.text("Rename", "Yeniden adlandır"), action: nil, keyEquivalent: "")
+                let renameMenu = NSMenu()
+                for account in accounts {
+                    renameMenu.addItem(menuItem(account.alias, #selector(renameDesktopAccount(_:)), represented: account.alias))
+                }
+                rename.submenu = renameMenu
+                menu.addItem(rename)
                 let remove = NSMenuItem(title: L.text("Remove", "Kaldır"), action: nil, keyEquivalent: "")
                 let submenu = NSMenu()
                 for account in accounts {
@@ -4014,6 +4110,13 @@ extension QuotaViewController {
                 }
                 remove.submenu = submenu
                 menu.addItem(remove)
+            }
+            menu.addItem(.separator())
+            let share = menuItem(L.text("Share Code Sessions Across Accounts", "Code oturumlarını hesaplar arasında paylaş"), #selector(toggleSessionSharing))
+            share.state = ClaudeSessionSharing.isEnabled ? .on : .off
+            menu.addItem(share)
+            if ClaudeSessionSharing.isEnabled {
+                menu.addItem(menuItem(L.text("Sync Sessions Now", "Oturumları şimdi eşitle"), #selector(syncSessionsNow)))
             }
         }
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.isFlipped ? anchor.bounds.height + 4 : -4), in: anchor)
@@ -4038,7 +4141,7 @@ extension QuotaViewController {
         DispatchQueue.global(qos: .userInitiated).async {
             var failure: Error?
             do {
-                try ClaudeProviderSwitcher.desktopAccounts.switchTo(alias)
+                try ClaudeProviderSwitcher.desktopAccounts.switchTo(alias, whileClosed: ClaudeProviderSwitcher.syncSessionsIfShared)
             } catch {
                 failure = error
             }
@@ -4047,14 +4150,40 @@ extension QuotaViewController {
     }
 
     @objc private func saveCurrentDesktopLogin() {
+        let store = ClaudeProviderSwitcher.desktopAccounts
+        let email = store.liveAccountUUID().flatMap(store.email(for:))
         guard let names = promptNames(
             L.text("Save Current Desktop Login", "Mevcut Desktop oturumunu kaydet"),
-            L.text("Name this account so you can switch back to it.", "Geri dönebilmek için bu hesaba bir ad ver."),
-            fields: [L.text("Account name", "Hesap adı")]
+            L.text("Name this account so you can switch back to it.", "Geri dönebilmek için bu hesaba bir ad ver.") + "\n\n" + Self.emptyNameNote,
+            fields: [PromptField(placeholder: email ?? L.text("Account name (optional)", "Hesap adı (isteğe bağlı)"))]
         ) else { return }
         var failure: Error?
         do {
-            try ClaudeProviderSwitcher.desktopAccounts.saveCurrent(as: names[0])
+            try store.saveCurrent(as: names[0])
+        } catch {
+            failure = error
+        }
+        finishProviderAction(failure)
+    }
+
+    private static var emptyNameNote: String {
+        L.text(
+            "Leave the name empty to use the account's email (from CLIProxy or Claude Code); if it is unknown, a short account id is used. You can rename it later.",
+            "Adı boş bırakırsan hesabın e-postası kullanılır (CLIProxy'den ya da Claude Code'dan); bilinmiyorsa kısa bir hesap kimliği verilir. Sonra yeniden adlandırabilirsin."
+        )
+    }
+
+    @objc private func renameDesktopAccount(_ sender: NSMenuItem) {
+        guard let alias = sender.representedObject as? String,
+              let names = promptNames(
+                  L.text("Rename \(alias)", "\(alias) hesabını yeniden adlandır"),
+                  L.text("Only GrandeBar's name for this login changes.", "Yalnız GrandeBar'daki ad değişir; Claude Desktop etkilenmez."),
+                  fields: [PromptField(placeholder: L.text("New name", "Yeni ad"), value: alias)]
+              ),
+              let newAlias = names[0] else { return }
+        var failure: Error?
+        do {
+            try ClaudeProviderSwitcher.desktopAccounts.rename(alias, to: newAlias)
         } catch {
             failure = error
         }
@@ -4064,21 +4193,24 @@ extension QuotaViewController {
     @objc private func addDesktopAccount() {
         let store = ClaudeProviderSwitcher.desktopAccounts
         let unsavedLive = store.activeAlias() == nil && store.liveIsSignedIn()
-        var fields = [L.text("New account name", "Yeni hesap adı")]
-        if unsavedLive { fields.append(L.text("Current account name", "Mevcut hesabın adı")) }
+        var fields = [PromptField(placeholder: L.text("New account name (optional)", "Yeni hesap adı (isteğe bağlı)"))]
+        if unsavedLive {
+            let email = store.liveAccountUUID().flatMap(store.email(for:))
+            fields.append(PromptField(placeholder: email ?? L.text("Current account name (optional)", "Mevcut hesabın adı (isteğe bağlı)")))
+        }
         var info = L.text(
             "Claude Desktop reopens at its sign-in screen. Sign in with the new account within 5 minutes; if you cancel, the current account comes back.",
             "Claude Desktop giriş ekranıyla yeniden açılır. Yeni hesapla 5 dakika içinde giriş yap; iptal edersen mevcut hesap geri gelir."
         )
         if unsavedLive {
-            info += "\n\n" + L.text("The current login is not saved yet, so it needs a name too.", "Mevcut oturum henüz kayıtlı değil; ona da bir ad ver.")
+            info += "\n\n" + L.text("The current login is not saved yet, so it is saved too.", "Mevcut oturum henüz kayıtlı değil; o da kaydedilir.")
         }
-        info += "\n\n" + Self.restartNote
+        info += "\n\n" + Self.emptyNameNote + "\n\n" + Self.restartNote
         guard let names = promptNames(L.text("Add Claude Desktop Account", "Claude Desktop hesabı ekle"), info, fields: fields) else { return }
         let newAlias = names[0]
         let currentAlias = unsavedLive ? names[1] : nil
 
-        DesktopLoginState.pendingAlias = newAlias
+        DesktopLoginState.pendingAlias = newAlias ?? L.text("new account", "yeni hesap")
         refreshProviderCard()
         DispatchQueue.global(qos: .userInitiated).async {
             let rollback: DesktopSessionCopy?
@@ -4094,12 +4226,21 @@ extension QuotaViewController {
             do {
                 let uuid = try store.waitForLogin()
                 let result = try store.finishLogin(newAlias: newAlias, accountUUID: uuid)
+                // Desktop loaded the new account's empty session list; restart once so it shows the shared sessions.
+                var restarted = false
+                if ClaudeSessionSharing.isEnabled, case .added = result, store.waitForSessionFolder(accountUUID: uuid) {
+                    restarted = (try? store.restartDesktop(whileClosed: ClaudeProviderSwitcher.syncSessionsIfShared)) != nil
+                }
                 DispatchQueue.main.async {
                     DesktopLoginState.pendingAlias = nil
                     self.refreshProviderCard()
                     switch result {
                     case .added(let alias):
-                        self.notify(L.text("Added \(alias)", "\(alias) eklendi"), L.text("Claude Desktop is now signed in as \(alias).", "Claude Desktop şimdi \(alias) hesabında."))
+                        var info = L.text("Claude Desktop is now signed in as \(alias).", "Claude Desktop şimdi \(alias) hesabında.")
+                        if restarted {
+                            info += " " + L.text("It restarted once to load the shared Code sessions.", "Ortak Code oturumlarını yüklemek için bir kez yeniden başlatıldı.")
+                        }
+                        self.notify(L.text("Added \(alias)", "\(alias) eklendi"), info)
                     case .alreadySaved(let alias):
                         self.notify(L.text("Already saved", "Zaten kayıtlı"), Self.message(for: DesktopAccountError.alreadySaved(alias)))
                     }
@@ -4119,6 +4260,51 @@ extension QuotaViewController {
                         self.finishProviderAction(failure)
                     }
                 }
+            }
+        }
+    }
+
+    // MARK: Code session sharing
+
+    fileprivate static var sessionSharingInfo: String {
+        L.text(
+            "When this is on, every Claude Desktop account and the CLIProxy profile list the same Code-tab sessions: GrandeBar copies the session list between them now and every 10 seconds while it runs. Deleting a session in one account deletes it everywhere. Chat-tab conversations stay with their claude.ai account and Cowork sessions are not shared.",
+            "Bu ayar açıkken tüm Claude Desktop hesapları ve CLIProxy profili aynı Code sekmesi oturumlarını listeler: GrandeBar oturum listesini şimdi ve açık kaldığı sürece her 10 saniyede bir aralarında kopyalar. Bir hesapta sildiğin oturum her yerden silinir. Chat sekmesindeki sohbetler kendi claude.ai hesabında kalır, Cowork oturumları paylaşılmaz."
+        )
+    }
+
+    @objc private func toggleSessionSharing() {
+        if ClaudeSessionSharing.isEnabled {
+            ClaudeSessionSharing.isEnabled = false
+            refreshProviderCard()
+            return
+        }
+        guard confirm(
+            L.text("Share Code Sessions Across Accounts?", "Code oturumları hesaplar arasında paylaşılsın mı?"),
+            Self.sessionSharingInfo,
+            button: L.text("Turn On and Import", "Aç ve içe aktar")
+        ) else { return }
+        ClaudeSessionSharing.isEnabled = true
+        syncSessionsNow()
+    }
+
+    @objc private func syncSessionsNow() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = ClaudeProviderSwitcher.sessionSharing.sync()
+            DispatchQueue.main.async {
+                self.refreshProviderCard()
+                let copied = result.added + result.updated
+                var info = L.text(
+                    "\(copied) session copies written across \(result.folders) account folders, \(result.removed) deleted sessions removed.",
+                    "\(result.folders) hesap klasörüne \(copied) oturum kopyası yazıldı, silinmiş \(result.removed) oturum kaldırıldı."
+                )
+                if result.added > 0 {
+                    info += "\n\n" + L.text(
+                        "Claude Desktop shows newly added sessions after its next restart (an account switch restarts it).",
+                        "Yeni eklenen oturumlar Claude Desktop bir sonraki açılışında görünür (hesap geçişi de yeniden başlatır)."
+                    )
+                }
+                self.notify(L.text("Code sessions synced", "Code oturumları eşitlendi"), info)
             }
         }
     }
@@ -4143,29 +4329,38 @@ extension QuotaViewController {
         finishProviderAction(failure)
     }
 
-    /// Asks for one name per field; nil when cancelled.
-    private func promptNames(_ title: String, _ info: String, fields: [String]) -> [String]? {
+    fileprivate struct PromptField {
+        let placeholder: String
+        var value = ""
+    }
+
+    /// Asks for one name per field; an empty field comes back as nil. Nil when cancelled.
+    private func promptNames(_ title: String, _ info: String, fields: [PromptField]) -> [String?]? {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = info
         alert.addButton(withTitle: L.text("Continue", "Devam"))
         alert.addButton(withTitle: L.text("Cancel", "İptal"))
-        let inputs = fields.map { placeholder -> NSTextField in
-            let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 22))
-            field.placeholderString = placeholder
+        let inputs = fields.map { spec -> NSTextField in
+            let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 22))
+            field.placeholderString = spec.placeholder
+            field.stringValue = spec.value
             field.translatesAutoresizingMaskIntoConstraints = false
-            field.widthAnchor.constraint(equalToConstant: 240).isActive = true
+            field.widthAnchor.constraint(equalToConstant: 260).isActive = true
             return field
         }
         let stack = NSStackView(views: inputs)
         stack.orientation = .vertical
         stack.spacing = 8
-        stack.frame = NSRect(x: 0, y: 0, width: 240, height: CGFloat(inputs.count) * 30 - 8)
+        stack.frame = NSRect(x: 0, y: 0, width: 260, height: CGFloat(inputs.count) * 30 - 8)
         alert.accessoryView = stack
         alert.window.appearance = Theme.appAppearance
         alert.window.initialFirstResponder = inputs.first
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        return inputs.map { $0.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return inputs.map {
+            let name = $0.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            return name.isEmpty ? nil : name
+        }
     }
 }

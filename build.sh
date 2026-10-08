@@ -18,6 +18,7 @@ chmod 0755 "$APP/Contents/Resources/install-update.sh"
 swiftc \
   "$ROOT/Sources/GrandeBar.swift" \
   "$ROOT/Sources/ClaudeDesktopAccounts.swift" \
+  "$ROOT/Sources/ClaudeSessionSharing.swift" \
   "$ROOT/Sources/GrandeBarUpdater.swift" \
   "$ROOT/Sources/main.swift" \
   -framework AppKit \

@@ -25,6 +25,7 @@ enum DesktopAccountError: Error, Equatable {
 struct DesktopAccount: Equatable {
     let alias: String
     let accountUUID: String
+    let email: String?
     let savedAt: Date
     /// False until the account has been switched away from once (cookies and LevelDB can
     /// only be copied while Desktop is closed).
@@ -184,6 +185,8 @@ final class ClaudeDesktopAccounts {
 
     let dataDir: URL
     let storeDir: URL
+    /// Claude Code's own account record (`oauthAccount`), one more source for emails.
+    private let claudeCodeConfig: URL
     private let app: DesktopAppControl
     private let fm = FileManager.default
     private let cancelLock = NSLock()
@@ -193,12 +196,14 @@ final class ClaudeDesktopAccounts {
         let support = URL(fileURLWithPath: home).appendingPathComponent("Library/Application Support")
         dataDir = support.appendingPathComponent("Claude")
         storeDir = support.appendingPathComponent("GrandeBar/ClaudeDesktop")
+        claudeCodeConfig = URL(fileURLWithPath: home).appendingPathComponent(".claude.json")
         self.app = app
     }
 
     private var accountsDir: URL { storeDir.appendingPathComponent("accounts") }
     private var backupsDir: URL { storeDir.appendingPathComponent("backups") }
     private var configURL: URL { dataDir.appendingPathComponent("config.json") }
+    private var knownEmailsURL: URL { storeDir.appendingPathComponent("known-emails.json") }
 
     private func profileDir(_ alias: String) -> URL { accountsDir.appendingPathComponent(alias) }
 
@@ -210,13 +215,14 @@ final class ClaudeDesktopAccounts {
 
     func accounts() -> [DesktopAccount] {
         guard let names = try? fm.contentsOfDirectory(atPath: accountsDir.path) else { return [] }
-        return names.sorted().compactMap { name in
+        return names.sorted().filter { !$0.hasPrefix(".") }.compactMap { name in
             let dir = profileDir(name)
             guard let data = try? Data(contentsOf: dir.appendingPathComponent("meta.json")),
                   let meta = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
                   let uuid = meta["accountUuid"] as? String, !uuid.isEmpty else { return nil }
             let savedAt = (meta["savedAt"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) } ?? .distantPast
-            return DesktopAccount(alias: name, accountUUID: uuid, savedAt: savedAt, hasSnapshot: hasSnapshot(dir))
+            let email = (meta["email"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            return DesktopAccount(alias: name, accountUUID: uuid, email: email, savedAt: savedAt, hasSnapshot: hasSnapshot(dir))
         }
     }
 
@@ -239,16 +245,93 @@ final class ClaudeDesktopAccounts {
 
     // MARK: Saving and removing
 
-    /// Saves the live account under `alias`. Only the token caches are copied now; the cookie
-    /// and LevelDB stores follow the first time Desktop is closed for a switch.
-    func saveCurrent(as alias: String) throws {
-        try validateNewAlias(alias)
+    /// Saves the live account under `alias`, or under its email when no alias is given. Only
+    /// the token caches are copied now; the cookie and LevelDB stores follow the first time
+    /// Desktop is closed for a switch. Returns the alias used.
+    @discardableResult
+    func saveCurrent(as alias: String?) throws -> String {
+        if let alias { try validateNewAlias(alias) }
         guard liveIsSignedIn(), let uuid = liveAccountUUID() else { throw DesktopAccountError.notSignedIn }
         if let existing = accounts().first(where: { $0.accountUUID == uuid }) {
             throw DesktopAccountError.alreadySaved(existing.alias)
         }
-        try writeMeta(alias: alias, accountUUID: uuid)
-        try? writeTokenFiles(into: profileDir(alias))
+        let name = alias ?? defaultAlias(for: uuid)
+        try writeMeta(alias: name, accountUUID: uuid)
+        try? writeTokenFiles(into: profileDir(name))
+        return name
+    }
+
+    /// Only GrandeBar's copy is renamed; Claude Desktop never sees aliases.
+    func rename(_ alias: String, to newAlias: String) throws {
+        guard accounts().contains(where: { $0.alias == alias }) else { throw DesktopAccountError.unknownAlias(alias) }
+        guard newAlias != alias else { return }
+        // A case-only change finds the old folder on a case-insensitive volume.
+        if newAlias.lowercased() == alias.lowercased() {
+            try validateAliasFormat(newAlias)
+        } else {
+            try validateNewAlias(newAlias)
+        }
+        let staged = accountsDir.appendingPathComponent(".rename-\(UUID().uuidString)")
+        try fm.moveItem(at: profileDir(alias), to: staged)
+        try fm.moveItem(at: staged, to: profileDir(newAlias))
+        var meta = readMeta(newAlias)
+        meta["label"] = newAlias
+        try writeJSON(meta, to: profileDir(newAlias).appendingPathComponent("meta.json"))
+    }
+
+    // MARK: Emails
+
+    /// Remembers an account's email (from a CLIProxy profile) and fills it into its saved copy.
+    func recordEmail(_ email: String, for accountUUID: String) {
+        guard Self.isEmail(email) else { return }
+        var known = readJSONFile(knownEmailsURL)
+        if known[accountUUID] as? String != email {
+            known[accountUUID] = email
+            try? writeJSON(known, to: knownEmailsURL)
+        }
+        if let account = accounts().first(where: { $0.accountUUID == accountUUID }), account.email != email {
+            var meta = readMeta(account.alias)
+            meta["email"] = email
+            try? writeJSON(meta, to: profileDir(account.alias).appendingPathComponent("meta.json"))
+        }
+    }
+
+    /// Saved copy first, then emails recorded from CLIProxy, then Claude Code's signed-in account.
+    func email(for accountUUID: String) -> String? {
+        if let saved = accounts().first(where: { $0.accountUUID == accountUUID })?.email { return saved }
+        if let known = readJSONFile(knownEmailsURL)[accountUUID] as? String, Self.isEmail(known) { return known }
+        let oauth = readJSONFile(claudeCodeConfig)["oauthAccount"] as? [String: Any] ?? [:]
+        if oauth["accountUuid"] as? String == accountUUID, let email = oauth["emailAddress"] as? String, Self.isEmail(email) {
+            return email
+        }
+        return nil
+    }
+
+    /// Fills missing emails into saved copies; cheap, so it runs whenever the menu opens.
+    func backfillEmails() {
+        for account in accounts() where account.email == nil {
+            if let email = email(for: account.accountUUID) { recordEmail(email, for: account.accountUUID) }
+        }
+    }
+
+    /// The email when it is a usable, free alias, else `account-<uuid prefix>`.
+    private func defaultAlias(for accountUUID: String, avoiding reserved: Set<String> = []) -> String {
+        let taken = Set(accounts().map { $0.alias.lowercased() }).union(reserved.map { $0.lowercased() })
+        if let email = email(for: accountUUID), (try? validateAliasFormat(email)) != nil, !taken.contains(email.lowercased()) {
+            return email
+        }
+        let base = "account-" + accountUUID.prefix(8)
+        var name = base
+        var index = 2
+        while taken.contains(name.lowercased()) || fm.fileExists(atPath: profileDir(name).path) {
+            name = "\(base)-\(index)"
+            index += 1
+        }
+        return name
+    }
+
+    private static func isEmail(_ value: String) -> Bool {
+        value.range(of: "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", options: .regularExpression) != nil
     }
 
     func remove(_ alias: String) throws {
@@ -285,18 +368,21 @@ final class ClaudeDesktopAccounts {
 
     /// Saves the live session (under `currentAlias` when it is not saved yet), clears the
     /// login and reopens Desktop at its sign-in screen. Returns the session to roll back to.
-    func beginLogin(newAlias: String, currentAlias: String?) throws -> DesktopSessionCopy? {
-        try validateNewAlias(newAlias)
+    /// Either alias may be nil to use the account's email. An unsaved live account is always
+    /// saved first, so the previous login is never lost.
+    func beginLogin(newAlias: String?, currentAlias: String?) throws -> DesktopSessionCopy? {
+        if let newAlias { try validateNewAlias(newAlias) }
         if let currentAlias {
             try validateNewAlias(currentAlias)
-            guard currentAlias != newAlias else { throw DesktopAccountError.aliasTaken(newAlias) }
+            guard currentAlias.lowercased() != newAlias?.lowercased() else { throw DesktopAccountError.aliasTaken(currentAlias) }
         }
         guard app.quitAndWait(timeout: Self.quitTimeout) else { throw DesktopAccountError.desktopDidNotQuit }
         defer { app.launch() }
 
-        if let currentAlias, liveIsSignedIn(), let uuid = liveAccountUUID(),
+        if liveIsSignedIn(), let uuid = liveAccountUUID(),
            !accounts().contains(where: { $0.accountUUID == uuid }) {
-            try writeMeta(alias: currentAlias, accountUUID: uuid)
+            let name = currentAlias ?? defaultAlias(for: uuid, avoiding: Set([newAlias].compactMap { $0 }))
+            try writeMeta(alias: name, accountUUID: uuid)
         }
         let rollback = try preserveLiveSession(reason: "login")
         try clearLiveLogin()
@@ -318,13 +404,14 @@ final class ClaudeDesktopAccounts {
         throw DesktopAccountError.loginTimedOut
     }
 
-    func finishLogin(newAlias: String, accountUUID: String) throws -> DesktopLoginResult {
+    func finishLogin(newAlias: String?, accountUUID: String) throws -> DesktopLoginResult {
         if let existing = accounts().first(where: { $0.accountUUID == accountUUID }) {
             return .alreadySaved(existing.alias)
         }
-        try writeMeta(alias: newAlias, accountUUID: accountUUID)
-        try? writeTokenFiles(into: profileDir(newAlias))
-        return .added(newAlias)
+        let name = newAlias ?? defaultAlias(for: accountUUID)
+        try writeMeta(alias: name, accountUUID: accountUUID)
+        try? writeTokenFiles(into: profileDir(name))
+        return .added(name)
     }
 
     /// Puts the session from before `beginLogin` back.
@@ -338,10 +425,31 @@ final class ClaudeDesktopAccounts {
 
     func cancelPendingLogin() { setCancelled(true) }
 
+    /// Desktop creates an account's Code session folder shortly after sign-in.
+    func waitForSessionFolder(accountUUID: String, timeout: TimeInterval = 30, pollInterval: TimeInterval = 1) -> Bool {
+        let accountDir = dataDir.appendingPathComponent("claude-code-sessions").appendingPathComponent(accountUUID)
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            let orgs = (try? fm.contentsOfDirectory(atPath: accountDir.path)) ?? []
+            if orgs.contains(where: { !$0.hasPrefix(".") && !$0.contains(".pre-share") }) { return true }
+            Thread.sleep(forTimeInterval: pollInterval)
+        } while Date() < deadline
+        return false
+    }
+
+    /// Quits Desktop, saves the live session, runs `whileClosed` and relaunches. Blocking.
+    func restartDesktop(whileClosed: () throws -> Void) throws {
+        guard app.quitAndWait(timeout: Self.quitTimeout) else { throw DesktopAccountError.desktopDidNotQuit }
+        defer { app.launch() }
+        try preserveLiveSession(reason: "restart")
+        try whileClosed()
+    }
+
     // MARK: Snapshots (Desktop must be closed)
 
     /// Saves the live session into its own profile when the account is saved, else into a
     /// timestamped backup, so it can be switched back to or rolled back.
+    @discardableResult
     private func preserveLiveSession(reason: String) throws -> DesktopSessionCopy? {
         guard liveIsSignedIn(), let uuid = liveAccountUUID() else { return nil }
         let dir: URL
@@ -441,10 +549,13 @@ final class ClaudeDesktopAccounts {
     }
 
     private func writeMeta(alias: String, accountUUID: String) throws {
-        try writeJSON(
-            ["label": alias, "accountUuid": accountUUID, "savedAt": Int(Date().timeIntervalSince1970)],
-            to: profileDir(alias).appendingPathComponent("meta.json")
-        )
+        var meta: [String: Any] = ["label": alias, "accountUuid": accountUUID, "savedAt": Int(Date().timeIntervalSince1970)]
+        meta["email"] = email(for: accountUUID)
+        try writeJSON(meta, to: profileDir(alias).appendingPathComponent("meta.json"))
+    }
+
+    private func readMeta(_ alias: String) -> [String: Any] {
+        readJSONFile(profileDir(alias).appendingPathComponent("meta.json"))
     }
 
     private func pruneBackups() {
@@ -456,11 +567,22 @@ final class ClaudeDesktopAccounts {
 
     // MARK: Helpers
 
-    private func validateNewAlias(_ alias: String) throws {
-        guard alias.range(of: "^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$", options: .regularExpression) != nil else {
+    /// Also accepts an email address, since that is the default alias.
+    private func validateAliasFormat(_ alias: String) throws {
+        guard alias.range(of: "^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$", options: .regularExpression) != nil else {
             throw DesktopAccountError.invalidAlias(alias)
         }
+    }
+
+    private func validateNewAlias(_ alias: String) throws {
+        try validateAliasFormat(alias)
         if fm.fileExists(atPath: profileDir(alias).path) { throw DesktopAccountError.aliasTaken(alias) }
+    }
+
+    private func readJSONFile(_ url: URL) -> [String: Any] {
+        guard let data = try? Data(contentsOf: url),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return [:] }
+        return object
     }
 
     private func readConfig() throws -> [String: Any] {
