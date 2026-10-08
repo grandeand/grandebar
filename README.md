@@ -6,7 +6,7 @@ GrandeBar is designed for this setup:
 
 - [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) runs your Codex/OpenAI CLI proxy and exposes the management API.
 - [router-for-me/Cli-Proxy-API-Management-Center](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) manages your accounts and quota from a web panel.
-- [ccusage/ccusage](https://github.com/ccusage/ccusage) reads local Codex usage and cost.
+- Local token cost is computed by GrandeBar itself from Codex and Claude Code session transcripts, using [ccusage](https://github.com/ccusage/ccusage)-format pricing bundled in `Resources/ccusage.json`.
 
 The app sits in your macOS menu bar, shows the combined session pool percentage, opens the management panel quickly, and copies a short quota/cost summary when needed.
 
@@ -17,7 +17,7 @@ The app sits in your macOS menu bar, shows the combined session pool percentage,
 - Reset credit count and nearest reset expiry.
 - One-click access to the Management Center quota page.
 - Auto refresh: manual, 5, 10, 15, 30, or 60 minutes.
-- Local token cost from `ccusage` across **all Codex homes** (`~/.codex` + `codex-grande` / `aof` / `main` isolated profiles); uses `--speed standard` so priority service-tier records do not inflate the footer cost.
+- Local token cost across **all Codex homes** (`~/.codex` + `codex-grande` / `aof` / `main` isolated profiles, `sessions` and `archived_sessions`) at standard pricing. Usage is the growth of each transcript's `total_token_usage`, so re-emitted `token_count` events are not counted twice.
 - Copyable English summary with token cost, remaining quota, reset credits, and per-account remaining.
 - **Manual session warm**: the flame button opens cold 5h windows through the configured remote management API.
 - Header status lines: `N account · R reset` plus `locked · open · cold/warmed` detail.
@@ -30,14 +30,6 @@ The app sits in your macOS menu bar, shows the combined session pool percentage,
 - Xcode Command Line Tools or a Swift toolchain with `swiftc`.
 - A running CLIProxyAPI-compatible management endpoint.
 - A management key for that endpoint.
-- `ccusage` installed as an executable available to the app.
-
-GrandeBar looks for `ccusage` in:
-
-- `~/.npm-global/bin/ccusage`
-- `/opt/homebrew/bin/ccusage`
-- `/usr/local/bin/ccusage`
-- the app process `PATH`
 
 ## Install with Homebrew
 
@@ -83,22 +75,14 @@ GrandeBar expects the panel and API to be available under the same origin:
 /v0/management/api-call
 ```
 
-3. Install `ccusage`.
-
-Use the install method from the `ccusage` repository, then verify that this command works in your terminal:
-
-```bash
-ccusage codex daily --json
-```
-
-4. Build the app.
+3. Build the app.
 
 ```bash
 ./build.sh
 open dist/GrandeBar.app
 ```
 
-5. Configure GrandeBar.
+4. Configure GrandeBar.
 
 On first launch, GrandeBar asks for the Management Center URL and management key. You can change them later from Settings.
 

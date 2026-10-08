@@ -46,6 +46,21 @@
         "inputCostPerToken": 0.000005,
         "outputCostPerToken": 0.00003,
         "cacheReadInputTokenCost": 0.0000005
+      },
+      "gpt-5.5": {
+        "inputCostPerToken": 0.000005,
+        "outputCostPerToken": 0.00003,
+        "cacheReadInputTokenCost": 0.0000005
+      },
+      "gpt-5.4": {
+        "inputCostPerToken": 0.0000025,
+        "outputCostPerToken": 0.000015,
+        "cacheReadInputTokenCost": 0.00000025
+      },
+      "gpt-5.3-codex": {
+        "inputCostPerToken": 0.00000175,
+        "outputCostPerToken": 0.000014,
+        "cacheReadInputTokenCost": 0.000000175
       }
     }
   },
@@ -96,6 +111,21 @@
           "inputCostPerToken": 0.000005,
           "outputCostPerToken": 0.00003,
           "cacheReadInputTokenCost": 0.0000005
+        },
+        "gpt-5.5": {
+          "inputCostPerToken": 0.000005,
+          "outputCostPerToken": 0.00003,
+          "cacheReadInputTokenCost": 0.0000005
+        },
+        "gpt-5.4": {
+          "inputCostPerToken": 0.0000025,
+          "outputCostPerToken": 0.000015,
+          "cacheReadInputTokenCost": 0.00000025
+        },
+        "gpt-5.3-codex": {
+          "inputCostPerToken": 0.00000175,
+          "outputCostPerToken": 0.000014,
+          "cacheReadInputTokenCost": 0.000000175
         }
       }
     }

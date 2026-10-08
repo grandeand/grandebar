@@ -1921,50 +1921,223 @@ private final class FlippedStackView: NSStackView {
 }
 
 private enum LocalCodexUsage {
-    /// Aggregates ccusage across default ~/.codex and isolated multi-profile homes
-    /// (codex-grande, codex-aof, codex-main, …). ccusage only reads one CODEX_HOME per run.
+    private struct Entry {
+        let date: Date
+        let model: String?
+        let input: Int
+        let cachedInput: Int
+        let cacheWrite: Int
+        let output: Int
+    }
+
+    private struct Totals: Equatable {
+        var input = 0, cachedInput = 0, cacheWrite = 0, output = 0
+
+        init() {}
+
+        init(_ usage: [String: Any]) {
+            input = intValue(usage["input_tokens"]) ?? 0
+            cachedInput = intValue(usage["cached_input_tokens"]) ?? 0
+            cacheWrite = intValue(usage["cache_write_input_tokens"]) ?? 0
+            output = intValue(usage["output_tokens"]) ?? 0
+        }
+
+        func covers(_ other: Totals) -> Bool {
+            input >= other.input && cachedInput >= other.cachedInput
+                && cacheWrite >= other.cacheWrite && output >= other.output
+        }
+    }
+
+    private struct FileState {
+        var offset: UInt64 = 0
+        var model: String?
+        var totals: Totals?
+        var entries: [String: Entry] = [:]
+    }
+
+    private struct Price {
+        let input: Double
+        let output: Double
+        let cacheRead: Double
+    }
+
+    private static let lock = NSLock()
+    private static var files: [String: FileState] = [:]
+    private static let tokenCountMarker = Data("\"token_count\"".utf8)
+    private static let turnContextMarker = Data("\"turn_context\"".utf8)
+
+    /// Reads rollout transcripts from every Codex home (default ~/.codex and the isolated
+    /// codex-grande, codex-aof, … profiles) instead of `ccusage codex`, which sums the
+    /// `last_token_usage` of every `token_count` event although Codex re-emits the same event
+    /// without new usage, and which ignores `archived_sessions`. Usage is the growth of
+    /// `total_token_usage` per transcript, deduplicated across transcripts.
     static func read() -> LocalUsage? {
+        lock.lock()
+        defer { lock.unlock() }
+
         let dates = dateKeys()
         let since = min(dates.weekStart, dates.monthStart)
         let homes = codexHomes()
-        guard !homes.isEmpty else { return nil }
+        guard !homes.isEmpty, let prices = loadPrices() else { return nil }
 
-        var today = 0.0
-        var week = 0.0
-        var month = 0.0
-        var models = Set<String>()
-        var anySuccess = false
+        let paths = transcriptPaths(homes: homes, modifiedSince: since)
+        files = files.filter { paths.contains($0.key) }
+        for path in paths.sorted() { update(path) }
 
-        for home in homes {
-            guard let json = ccusageJSON(since: since, codexHome: home),
-                  let rows = json["daily"] as? [[String: Any]] else {
-                return nil // A failed profile makes the aggregate incomplete.
-            }
-            anySuccess = true
-            for row in rows {
-                guard let date = row["date"] as? String,
-                      let cost = doubleValue(row["costUSD"]),
-                      cost.isFinite, cost >= 0 else { return nil }
-                if date >= since, hasUnpricedUsage(row) {
-                    return nil
-                }
-                if date == dates.today { today += cost }
-                if date >= dates.weekStart { week += cost }
-                if date >= dates.monthStart { month += cost }
-                if date >= dates.weekStart {
-                    for model in modelNames(from: row) {
-                        models.insert(model)
-                    }
-                }
-            }
+        // Forked and resumed sessions copy earlier events into a new transcript.
+        var merged: [String: Entry] = [:]
+        for state in files.values {
+            merged.merge(state.entries) { current, _ in current }
         }
 
-        guard anySuccess else { return nil }
+        var today = 0.0, week = 0.0, month = 0.0
+        var models = Set<String>()
+        var pricedDays = Set<String>(), unpricedDays = Set<String>()
+        for entry in merged.values {
+            let day = dateKey(entry.date)
+            guard day >= since else { continue }
+            guard let model = entry.model, let price = price(for: model, in: prices) else {
+                if entry.input + entry.output > 0 { unpricedDays.insert(day) }
+                continue
+            }
+            let cost = (Double(entry.input - entry.cachedInput) * price.input
+                + Double(entry.cachedInput) * price.cacheRead
+                + Double(entry.cacheWrite) * price.input
+                + Double(entry.output) * price.output)
+            if cost > 0 { pricedDays.insert(day) }
+            if day == dates.today { today += cost }
+            if day >= dates.weekStart {
+                week += cost
+                models.insert(normalizedModelName(model))
+            }
+            if day >= dates.monthStart { month += cost }
+        }
+        // A day whose usage is entirely unpriced (a new model) would show a misleading $0.
+        guard unpricedDays.isSubset(of: pricedDays) else { return nil }
         return LocalUsage(today: today, week: week, month: month, models: models.sorted())
     }
 
     static func format(_ amount: Double) -> String {
         String(format: "$%.2f", amount)
+    }
+
+    private static func transcriptPaths(homes: [String], modifiedSince day: String) -> Set<String> {
+        let fm = FileManager.default
+        let cutoff = dayFormatter.date(from: day) ?? .distantPast
+        var paths = Set<String>()
+        for home in homes {
+            for folder in ["sessions", "archived_sessions"] {
+                guard let enumerator = fm.enumerator(
+                    at: URL(fileURLWithPath: home).appendingPathComponent(folder),
+                    includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey]
+                ) else { continue }
+                for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+                    let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
+                    guard values?.isRegularFile == true,
+                          (values?.contentModificationDate ?? .distantPast) >= cutoff else { continue }
+                    paths.insert(url.path)
+                }
+            }
+        }
+        return paths
+    }
+
+    /// Transcripts are append-only, so only the bytes after the last complete line are parsed.
+    private static func update(_ path: String) {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return }
+        defer { try? handle.close() }
+        var state = files[path] ?? FileState()
+        let size = (try? handle.seekToEnd()) ?? 0
+        if size < state.offset { state = FileState() }
+        guard size > state.offset else { return }
+        do {
+            try handle.seek(toOffset: state.offset)
+        } catch {
+            return
+        }
+        guard let data = try? handle.readToEnd(),
+              let lastNewline = data.lastIndex(of: UInt8(ascii: "\n")) else { return }
+
+        var lineStart = data.startIndex
+        while lineStart <= lastNewline {
+            let lineEnd = data[lineStart...lastNewline].firstIndex(of: UInt8(ascii: "\n")) ?? lastNewline
+            let line = data[lineStart..<lineEnd]
+            if line.range(of: tokenCountMarker) != nil || line.range(of: turnContextMarker) != nil {
+                apply(line, to: &state)
+            }
+            lineStart = lineEnd + 1
+        }
+        state.offset += UInt64(lastNewline - data.startIndex + 1)
+        files[path] = state
+    }
+
+    private static func apply(_ line: Data, to state: inout FileState) {
+        guard let json = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
+              let payload = json["payload"] as? [String: Any] else { return }
+        if json["type"] as? String == "turn_context" {
+            if let model = payload["model"] as? String { state.model = model }
+            return
+        }
+        guard payload["type"] as? String == "token_count",
+              let info = payload["info"] as? [String: Any],
+              let total = info["total_token_usage"] as? [String: Any],
+              let timestamp = json["timestamp"] as? String,
+              let date = date(timestamp) else { return }
+
+        let current = Totals(total)
+        guard current != state.totals else { return } // Re-emitted event, no new usage.
+        var delta = Totals()
+        if let previous = state.totals, current.covers(previous) {
+            delta.input = current.input - previous.input
+            delta.cachedInput = current.cachedInput - previous.cachedInput
+            delta.cacheWrite = current.cacheWrite - previous.cacheWrite
+            delta.output = current.output - previous.output
+        } else if let last = info["last_token_usage"] as? [String: Any] {
+            // First event of a continued thread (its counter carries the earlier total) or a reset.
+            delta = Totals(last)
+        } else {
+            delta = current
+        }
+        state.totals = current
+        let key = "\(timestamp)|\(current.input)|\(current.cachedInput)|\(current.output)"
+        state.entries[key] = Entry(
+            date: date,
+            model: state.model,
+            input: delta.input,
+            cachedInput: min(delta.cachedInput, delta.input),
+            cacheWrite: delta.cacheWrite,
+            output: delta.output
+        )
+    }
+
+    /// Prices come from the bundled ccusage-format config so both stay in one place.
+    private static func loadPrices() -> [String: Price]? {
+        guard let path = ccusageConfigPath(),
+              let data = FileManager.default.contents(atPath: path),
+              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        let codex = (json["codex"] as? [String: Any])?["defaults"] as? [String: Any]
+        let shared = json["defaults"] as? [String: Any]
+        var prices: [String: Price] = [:]
+        for scope in [shared, codex] {
+            for (model, value) in scope?["pricingOverrides"] as? [String: Any] ?? [:] {
+                guard let value = value as? [String: Any],
+                      let input = doubleValue(value["inputCostPerToken"]),
+                      let output = doubleValue(value["outputCostPerToken"]) else { continue }
+                let cacheRead = doubleValue(value["cacheReadInputTokenCost"]) ?? input
+                prices[model.lowercased()] = Price(input: input, output: output, cacheRead: cacheRead)
+            }
+        }
+        return prices.isEmpty ? nil : prices
+    }
+
+    /// Exact id first, then the longest priced id the model name starts with.
+    private static func price(for model: String, in prices: [String: Price]) -> Price? {
+        let model = model.lowercased()
+        if let price = prices[model] { return price }
+        return prices.keys
+            .filter { model.hasPrefix($0) }
+            .max { $0.count < $1.count }
+            .flatMap { prices[$0] }
     }
 
     /// Default Codex home + m365bridge multi-profile homes that actually have sessions.
@@ -2021,47 +2194,7 @@ private enum LocalCodexUsage {
         return homes
     }
 
-    private static func ccusageJSON(since: String, codexHome: String) -> [String: Any]? {
-        guard let path = ccusagePath() else { return nil }
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: path)
-        // Use bundled pricing overrides offline; standard pricing prevents
-        // priority service tier records from inflating the displayed cost.
-        var arguments = [
-            "codex", "daily",
-            "--json",
-            "--offline",
-            "--speed", "standard",
-            "--timezone", TimeZone.current.identifier,
-            "--since", since
-        ]
-        if let configPath = ccusageConfigPath() {
-            arguments += ["--config", configPath]
-        }
-        process.arguments = arguments
-        var environment = ProcessInfo.processInfo.environment
-        let extraPath = "\(FileManager.default.homeDirectoryForCurrentUser.path)/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-        environment["PATH"] = "\(extraPath):\(environment["PATH"] ?? "")"
-        // Isolated profiles (codex-grande, …) store sessions under their own CODEX_HOME.
-        environment["CODEX_HOME"] = codexHome
-        process.environment = environment
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
-
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
-        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-    }
-
-    /// Bundled pricing for models missing from ccusage embedded tables (e.g. gpt-5.6-reasoning).
+    /// Bundled Codex model pricing in ccusage config format.
     private static func ccusageConfigPath() -> String? {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser.path
@@ -2079,21 +2212,14 @@ private enum LocalCodexUsage {
         return candidates.first { fm.isReadableFile(atPath: $0) }
     }
 
-    private static func ccusagePath() -> String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let candidates = [
-            "\(home)/.npm-global/bin/ccusage",
-            "/opt/homebrew/bin/ccusage",
-            "/usr/local/bin/ccusage"
-        ]
-        if let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
-            return path
-        }
-        return ProcessInfo.processInfo.environment["PATH"]?
-            .split(separator: ":")
-            .map { "\($0)/ccusage" }
-            .first { FileManager.default.isExecutableFile(atPath: $0) }
-    }
+    private static let dayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .iso8601)
+        formatter.timeZone = .current
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
 
     private static func dateKeys() -> (today: String, weekStart: String, monthStart: String) {
         let now = Date()
@@ -2106,12 +2232,18 @@ private enum LocalCodexUsage {
     }
 
     private static func dateKey(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .iso8601)
-        formatter.timeZone = .current
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: date)
+        dayFormatter.string(from: date)
+    }
+
+    private static let fractionalFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private static let plainFormatter = ISO8601DateFormatter()
+
+    private static func date(_ value: String) -> Date? {
+        fractionalFormatter.date(from: value) ?? plainFormatter.date(from: value)
     }
 
     private static func doubleValue(_ value: Any?) -> Double? {
@@ -2120,18 +2252,10 @@ private enum LocalCodexUsage {
         return nil
     }
 
-    private static func hasUnpricedUsage(_ row: [String: Any]) -> Bool {
-        let input = doubleValue(row["inputTokens"]) ?? 0
-        let output = doubleValue(row["outputTokens"]) ?? 0
-        let cache = doubleValue(row["cacheReadTokens"]) ?? 0
-        let cost = doubleValue(row["costUSD"]) ?? 0
-        if cost == 0 && input + output + cache > 0 { return true }
-        return false
-    }
-
-    private static func modelNames(from row: [String: Any]) -> [String] {
-        guard let models = row["models"] as? [String: Any] else { return [] }
-        return models.keys.map(normalizedModelName)
+    private static func intValue(_ value: Any?) -> Int? {
+        if let number = value as? NSNumber { return number.intValue }
+        if let string = value as? String { return Int(string) }
+        return nil
     }
 
     private static func normalizedModelName(_ model: String) -> String {

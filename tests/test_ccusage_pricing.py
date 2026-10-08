@@ -15,9 +15,16 @@ class CodexPricingTests(unittest.TestCase):
     def test_override_scopes_match(self):
         config = json.loads(CONFIG.read_text())
         self.assertEqual(
-            config["defaults"]["pricingOverrides"]["gpt-6.1-sol"],
-            config["codex"]["defaults"]["pricingOverrides"]["gpt-6.1-sol"],
+            config["defaults"]["pricingOverrides"],
+            config["codex"]["defaults"]["pricingOverrides"],
         )
+
+    def test_recent_codex_models_are_priced(self):
+        overrides = json.loads(CONFIG.read_text())["codex"]["defaults"]["pricingOverrides"]
+        for model in ("gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-5.3-codex"):
+            with self.subTest(model=model):
+                self.assertGreater(overrides[model]["inputCostPerToken"], 0)
+                self.assertGreater(overrides[model]["outputCostPerToken"], 0)
 
     def test_standard_cost_includes_cached_tokens(self):
         executable = os.environ.get("CCUSAGE_BIN") or shutil.which("ccusage")
