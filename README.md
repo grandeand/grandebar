@@ -21,6 +21,8 @@ The app sits in your macOS menu bar, shows the combined session pool percentage,
 - Copyable English summary with token cost, remaining quota, reset credits, and per-account remaining.
 - **Manual session warm**: the flame button opens cold 5h windows through the configured remote management API.
 - Header status lines: `N account · R reset` plus `locked · open · cold/warmed` detail.
+- **Claude mode**: the Codex / Claude switch under the header shows Claude OAuth accounts from a (local) CLIProxyAPI with the same cards in an orange accent. Session 5h and weekly come from `api/oauth/usage`; accounts without a general weekly limit show their Fable weekly limit. The flame button warms cold Claude 5h windows with a one-token Haiku request, and the footer shows `ccusage claude` cost.
+- **Claude provider switch** (Claude mode only): points Claude Desktop (third-party gateway profile) and Claude Code (`~/.claude/settings.json` env) at the Claude CLIProxyAPI, or back to the official account. Claude Desktop is quit and reopened; each touched file is backed up once as `*.grandebar.bak`.
 
 ## Requirements
 

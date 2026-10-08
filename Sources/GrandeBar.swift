@@ -2,8 +2,25 @@ import AppKit
 import Foundation
 import ServiceManagement
 
+private enum AppMode: String, CaseIterable {
+    case codex
+    case claude
+
+    var title: String {
+        switch self {
+        case .codex: return "Codex"
+        case .claude: return "Claude"
+        }
+    }
+}
+
 private enum AppConfig {
+    static let modeKey = "appMode"
     static let defaultAPIBase = "http://localhost:8317"
+    static let claudeDefaultAPIBase = "http://127.0.0.1:8317"
+    static let claudeAPIBaseKey = "claudeApiBase"
+    static let claudeManagementKeyKey = "claudeManagementKey"
+    static let claudeAutomaticWarmupKey = "claudeAutomaticSessionWarmup"
     static let apiBaseKey = "apiBase"
     static let defaultsKey = "managementKey"
     static let lastRefreshKey = "lastRefreshAt"
@@ -15,15 +32,53 @@ private enum AppConfig {
     static let languageKey = "languageMode"
     static let languageOptions = ["auto", "en", "tr"]
 
+    static func mode() -> AppMode {
+        AppMode(rawValue: UserDefaults.standard.string(forKey: modeKey) ?? "") ?? .codex
+    }
+
+    static func setMode(_ mode: AppMode) {
+        UserDefaults.standard.set(mode.rawValue, forKey: modeKey)
+    }
+
     static func apiBase() -> String {
-        let saved = UserDefaults.standard.string(forKey: apiBaseKey) ?? defaultAPIBase
-        return normalizedBase(saved)
+        apiBase(for: mode())
+    }
+
+    static func apiBase(for mode: AppMode) -> String {
+        switch mode {
+        case .codex:
+            return normalizedBase(UserDefaults.standard.string(forKey: apiBaseKey) ?? defaultAPIBase)
+        case .claude:
+            return normalizedBase(UserDefaults.standard.string(forKey: claudeAPIBaseKey) ?? claudeDefaultAPIBase)
+        }
+    }
+
+    static func managementKey(for mode: AppMode) -> String {
+        let key = mode == .codex ? defaultsKey : claudeManagementKeyKey
+        let saved = (UserDefaults.standard.string(forKey: key) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if saved.isEmpty, mode == .claude {
+            return localCredential("MANAGEMENT_KEY") ?? ""
+        }
+        return saved
+    }
+
+    /// Reads `~/cliproxyapi/.credentials` written by the local CLIProxyAPI install, if present.
+    static func localCredential(_ name: String) -> String? {
+        let path = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("cliproxyapi/.credentials").path
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return nil }
+        for line in text.split(separator: "\n") where line.hasPrefix(name + "=") {
+            let value = String(line.dropFirst(name.count + 1)).trimmingCharacters(in: .whitespaces)
+            return value.isEmpty ? nil : value
+        }
+        return nil
     }
 
     static func hasManagementKey() -> Bool {
-        !(UserDefaults.standard.string(forKey: defaultsKey) ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .isEmpty
+        hasManagementKey(for: mode())
+    }
+
+    static func hasManagementKey(for mode: AppMode) -> Bool {
+        !managementKey(for: mode).isEmpty
     }
 
     static func managementURL() -> URL {
@@ -39,8 +94,11 @@ private enum AppConfig {
         minutes == 0 ? L.text("Manual only", "Sadece manuel") : "\(minutes) \(L.text("min", "dk"))"
     }
 
-    static func automaticWarmupEnabled() -> Bool {
-        UserDefaults.standard.object(forKey: automaticWarmupKey) as? Bool ?? true
+    static func automaticWarmupEnabled(for mode: AppMode) -> Bool {
+        switch mode {
+        case .codex: return UserDefaults.standard.object(forKey: automaticWarmupKey) as? Bool ?? true
+        case .claude: return UserDefaults.standard.object(forKey: claudeAutomaticWarmupKey) as? Bool ?? true
+        }
     }
 
     static func appearanceMode() -> String {
@@ -95,7 +153,9 @@ private enum L {
 private enum UI {
     /// Between original 315 and the too-wide 372; costs-only footer fits 5-digit $ amounts.
     static let popoverWidth: CGFloat = 325
-    static let popoverHeight: CGFloat = 475
+    static let popoverHeight: CGFloat = 507
+    static let modeRowHeight: CGFloat = 22
+    static let providerCardHeight: CGFloat = 62
     static let cardWidth: CGFloat = 301
     static let accountCardHeight: CGFloat = 106
     static let summaryCardHeight: CGFloat = 104
@@ -149,6 +209,8 @@ private enum Theme {
     static let secondaryText = NSColor.secondaryLabelColor
     static let mutedText = NSColor.tertiaryLabelColor
     static let buttonTint = NSColor.labelColor.withAlphaComponent(0.82)
+    static let claudeAccent = NSColor(calibratedRed: 0.85, green: 0.47, blue: 0.34, alpha: 1)
+    static var accent: NSColor { AppConfig.mode() == .claude ? claudeAccent : .systemBlue }
     static var shadow: NSColor { NSColor.black.withAlphaComponent(isDark ? 0.10 : 0.20) }
 }
 
@@ -165,6 +227,11 @@ private struct QuotaCard {
     let allowed: Bool?
     let limitReached: Bool?
     let updatedAt: Date
+    /// Claude: label for the weekly row (e.g. "Fable" when only a model-scoped weekly limit exists).
+    var weeklyLabel: String? = nil
+    /// Claude: replaces the Codex reset-credit lines on the card's top right.
+    var headline: String? = nil
+    var subline: String? = nil
 
     var isLocked: Bool {
         if allowed == false { return true }
@@ -210,6 +277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         icon?.isTemplate = true
         statusItem.button?.image = icon
         statusItem.button?.imagePosition = .imageLeading
+        applyModeToStatusItem()
         setStatusTitle(" --%\n --%")
         statusItem.button?.toolTip = "GrandeBar"
         statusItem.button?.target = self
@@ -219,6 +287,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         quotaViewController = QuotaViewController { [weak self] title, tooltip in
             self?.setStatusTitle(title)
             self?.statusItem.button?.toolTip = tooltip
+        }
+        quotaViewController.onModeChange = { [weak self] in
+            self?.applyModeToStatusItem()
         }
 
         popover = NSPopover()
@@ -320,6 +391,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
     }
 
+    /// Claude mode tints the menu bar gauge so the active mode is visible without opening the popover.
+    private func applyModeToStatusItem() {
+        statusItem.button?.contentTintColor = AppConfig.mode() == .claude ? Theme.claudeAccent : nil
+    }
+
     private func setStatusTitle(_ title: String) {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .right
@@ -338,7 +414,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
 final class QuotaViewController: NSViewController {
     private let statusUpdate: (String, String) -> Void
-    private let api = QuotaAPI()
+    var onModeChange: (() -> Void)?
+    private var modeControl: NSSegmentedControl!
     private var stackView: NSStackView!
     private var scrollView: NSScrollView!
     private var subtitleLabel: NSTextField!
@@ -352,7 +429,12 @@ final class QuotaViewController: NSViewController {
     private var lastRefreshAt: Date?
     private var elapsedTimer: Timer?
     private var autoRefreshTimer: Timer?
-    private var automaticWarmupTimer: Timer?
+    private var automaticWarmupTimers: [AppMode: Timer] = [:]
+    /// Warm runs for the mode that is not on screen (keeps both modes' 5h windows warm).
+    private var backgroundWarmups: [AppMode: SessionWarmupAPI] = [:]
+    private var cardsByMode: [AppMode: [QuotaCard]] = [:]
+    /// Bumped on mode switch so in-flight refreshes of the previous mode are dropped.
+    private var refreshGeneration = 0
     private var wakeObserver: NSObjectProtocol?
     private var isRefreshing = false
     private var isWarming = false
@@ -372,7 +454,13 @@ final class QuotaViewController: NSViewController {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.automaticWarmupCheck()
+            AppMode.allCases.forEach { self?.automaticWarmupCheck(mode: $0) }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self else { return }
+            for mode in AppMode.allCases where mode != AppConfig.mode() {
+                self.automaticWarmupCheck(mode: mode)
+            }
         }
     }
 
@@ -392,7 +480,7 @@ final class QuotaViewController: NSViewController {
         root.heightAnchor.constraint(equalToConstant: UI.popoverHeight).isActive = true
 
         let headerIcon = NSImageView(image: NSImage(systemSymbolName: "gauge.with.dots.needle.67percent", accessibilityDescription: nil) ?? NSImage())
-        headerIcon.contentTintColor = NSColor.systemBlue.withAlphaComponent(0.95)
+        headerIcon.contentTintColor = Theme.accent.withAlphaComponent(0.95)
         headerIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 20, weight: .medium)
         headerIcon.translatesAutoresizingMaskIntoConstraints = false
 
@@ -410,7 +498,7 @@ final class QuotaViewController: NSViewController {
         title.textColor = Theme.primaryText
 
         // Line 1: short classic summary (accounts · resets)
-        subtitleLabel = NSTextField(labelWithString: L.text("Codex quota", "Codex kota"))
+        subtitleLabel = NSTextField(labelWithString: L.text("\(AppConfig.mode().title) quota", "\(AppConfig.mode().title) kota"))
         subtitleLabel.font = .systemFont(ofSize: 10, weight: .medium)
         subtitleLabel.textColor = Theme.secondaryText
         subtitleLabel.lineBreakMode = .byTruncatingMiddle
@@ -446,6 +534,15 @@ final class QuotaViewController: NSViewController {
         divider.translatesAutoresizingMaskIntoConstraints = false
         divider.wantsLayer = true
         divider.layer?.backgroundColor = Theme.divider.cgColor
+
+        modeControl = NSSegmentedControl(labels: AppMode.allCases.map(\.title), trackingMode: .selectOne, target: self, action: #selector(modeChanged))
+        modeControl.segmentStyle = .rounded
+        modeControl.controlSize = .small
+        modeControl.selectedSegment = AppMode.allCases.firstIndex(of: AppConfig.mode()) ?? 0
+        modeControl.translatesAutoresizingMaskIntoConstraints = false
+        for index in AppMode.allCases.indices {
+            modeControl.setWidth((UI.cardWidth - 4) / CGFloat(AppMode.allCases.count), forSegment: index)
+        }
 
         stackView = FlippedStackView()
         stackView.frame = NSRect(x: 0, y: 0, width: UI.popoverWidth, height: 1)
@@ -492,6 +589,7 @@ final class QuotaViewController: NSViewController {
 
         root.addSubview(header)
         root.addSubview(divider)
+        root.addSubview(modeControl)
         root.addSubview(scrollView)
         root.addSubview(footer)
 
@@ -527,7 +625,11 @@ final class QuotaViewController: NSViewController {
 
             scrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scrollView.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 10),
+            modeControl.centerXAnchor.constraint(equalTo: root.centerXAnchor),
+            modeControl.topAnchor.constraint(equalTo: divider.bottomAnchor, constant: 9),
+            modeControl.heightAnchor.constraint(equalToConstant: UI.modeRowHeight),
+
+            scrollView.topAnchor.constraint(equalTo: modeControl.bottomAnchor, constant: 10),
             scrollView.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -8),
 
             footer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
@@ -578,9 +680,11 @@ final class QuotaViewController: NSViewController {
             }
         }
 
-        api.fetchQuota { [weak self] result in
+        let mode = AppConfig.mode()
+        let generation = refreshGeneration
+        QuotaAPI(mode: mode).fetchQuota { [weak self] result in
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, generation == self.refreshGeneration else { return }
                 self.isRefreshing = false
                 self.setHeaderActionsEnabled(true)
                 self.lastRefreshAt = Date()
@@ -612,7 +716,7 @@ final class QuotaViewController: NSViewController {
         setDetailLine(detailText(for: latestCards, warming: true))
         lastRefreshLabel.stringValue = L.text("Warming...", "Açılıyor...")
 
-        let warmup = SessionWarmupAPI()
+        let warmup = SessionWarmupAPI(mode: AppConfig.mode())
         activeWarmup = warmup
         warmup.warmEligibleAccounts { [weak self] result in
             DispatchQueue.main.async {
@@ -640,6 +744,29 @@ final class QuotaViewController: NSViewController {
     private func setHeaderActionsEnabled(_ enabled: Bool) {
         warmButton.isEnabled = enabled
         refreshButton.isEnabled = enabled
+        // A warm run belongs to the visible mode; switching mid-run would mislabel its result.
+        modeControl.isEnabled = !isWarming
+    }
+
+    @objc private func modeChanged() {
+        let index = modeControl.selectedSegment
+        guard AppMode.allCases.indices.contains(index) else { return }
+        let mode = AppMode.allCases[index]
+        guard mode != AppConfig.mode(), !isWarming else { return }
+
+        AppConfig.setMode(mode)
+        refreshGeneration += 1
+        isRefreshing = false
+        lastWarmNewCount = nil
+        warmNewClearWorkItem?.cancel()
+        latestCards = cardsByMode[mode] ?? []
+        latestUsage = nil
+        onModeChange?()
+        reloadViewForAppearance()
+        if latestCards.isEmpty {
+            renderIdle()
+        }
+        refreshQuota()
     }
 
     private func recordWarmNewCount(_ count: Int) {
@@ -692,7 +819,7 @@ final class QuotaViewController: NSViewController {
     deinit {
         elapsedTimer?.invalidate()
         autoRefreshTimer?.invalidate()
-        automaticWarmupTimer?.invalidate()
+        automaticWarmupTimers.values.forEach { $0.invalidate() }
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
         }
@@ -723,21 +850,33 @@ final class QuotaViewController: NSViewController {
     }
 
     func showSettings(isInitialSetup: Bool = false, refreshAfterSave: Bool = false) {
-        let baseField = NSTextField(string: AppConfig.apiBase())
+        let baseField = NSTextField(string: AppConfig.apiBase(for: .codex))
         let keyField = NSSecureTextField(string: UserDefaults.standard.string(forKey: AppConfig.defaultsKey) ?? "")
+        let claudeBaseField = NSTextField(string: AppConfig.apiBase(for: .claude))
+        let claudeKeyField = NSSecureTextField(string: UserDefaults.standard.string(forKey: AppConfig.claudeManagementKeyKey) ?? "")
         let autoRefreshPopup = NSPopUpButton(frame: .zero, pullsDown: false)
         let appearancePopup = NSPopUpButton(frame: .zero, pullsDown: false)
         let languagePopup = NSPopUpButton(frame: .zero, pullsDown: false)
         let automaticWarmup = NSButton(
-            checkboxWithTitle: L.text("Automatic session warmup", "Otomatik oturum warmup"),
+            checkboxWithTitle: L.text("Automatic session warmup (Codex)", "Otomatik oturum warmup (Codex)"),
             target: nil,
             action: nil
         )
-        automaticWarmup.state = AppConfig.automaticWarmupEnabled() ? .on : .off
+        automaticWarmup.state = AppConfig.automaticWarmupEnabled(for: .codex) ? .on : .off
+        let claudeAutomaticWarmup = NSButton(
+            checkboxWithTitle: L.text("Automatic session warmup (Claude)", "Otomatik oturum warmup (Claude)"),
+            target: nil,
+            action: nil
+        )
+        claudeAutomaticWarmup.state = AppConfig.automaticWarmupEnabled(for: .claude) ? .on : .off
         let launchAtLogin = NSButton(checkboxWithTitle: L.text("Launch at Login", "Girişte aç"), target: nil, action: nil)
         launchAtLogin.state = SMAppService.mainApp.status == .enabled ? .on : .off
         baseField.placeholderString = "https://ai.example.com"
         keyField.placeholderString = L.text("Management key", "Management key")
+        claudeBaseField.placeholderString = AppConfig.claudeDefaultAPIBase
+        claudeKeyField.placeholderString = AppConfig.localCredential("MANAGEMENT_KEY") != nil
+            ? L.text("From ~/cliproxyapi/.credentials", "~/cliproxyapi/.credentials'tan")
+            : L.text("Management key", "Management key")
         for minutes in AppConfig.autoRefreshOptions {
             autoRefreshPopup.addItem(withTitle: AppConfig.autoRefreshTitle(for: minutes))
             autoRefreshPopup.lastItem?.representedObject = minutes
@@ -756,43 +895,41 @@ final class QuotaViewController: NSViewController {
         }
         languagePopup.selectItem(withTitle: AppConfig.languageTitle(for: AppConfig.languageMode()))
 
-        let settingsView = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 238))
+        let settingsView = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 390))
         settingsView.appearance = Theme.appAppearance
-        let baseLabel = NSTextField(labelWithString: "Base URL")
-        let keyLabel = NSTextField(labelWithString: L.text("Management key", "Management key"))
+        let baseLabel = NSTextField(labelWithString: "Codex Base URL")
+        let keyLabel = NSTextField(labelWithString: L.text("Codex management key", "Codex management key"))
+        let claudeBaseLabel = NSTextField(labelWithString: "Claude Base URL")
+        let claudeKeyLabel = NSTextField(labelWithString: L.text("Claude management key", "Claude management key"))
         let autoRefreshLabel = NSTextField(labelWithString: L.text("Auto refresh", "Otomatik yenile"))
         let appearanceLabel = NSTextField(labelWithString: L.text("Appearance", "Görünüm"))
         let languageLabel = NSTextField(labelWithString: L.text("Language", "Dil"))
-        baseLabel.frame = NSRect(x: 0, y: 214, width: 340, height: 18)
-        baseField.frame = NSRect(x: 0, y: 186, width: 340, height: 24)
-        keyLabel.frame = NSRect(x: 0, y: 160, width: 340, height: 18)
-        keyField.frame = NSRect(x: 0, y: 132, width: 340, height: 24)
-        autoRefreshLabel.frame = NSRect(x: 0, y: 104, width: 150, height: 22)
-        autoRefreshPopup.frame = NSRect(x: 156, y: 102, width: 184, height: 26)
-        appearanceLabel.frame = NSRect(x: 0, y: 76, width: 150, height: 22)
-        appearancePopup.frame = NSRect(x: 156, y: 74, width: 184, height: 26)
-        languageLabel.frame = NSRect(x: 0, y: 48, width: 150, height: 22)
-        languagePopup.frame = NSRect(x: 156, y: 46, width: 184, height: 26)
-        automaticWarmup.frame = NSRect(x: 0, y: 20, width: 340, height: 22)
-        launchAtLogin.frame = NSRect(x: 0, y: -4, width: 340, height: 22)
-        settingsView.addSubview(baseLabel)
-        settingsView.addSubview(baseField)
-        settingsView.addSubview(keyLabel)
-        settingsView.addSubview(keyField)
-        settingsView.addSubview(autoRefreshLabel)
-        settingsView.addSubview(autoRefreshPopup)
-        settingsView.addSubview(appearanceLabel)
-        settingsView.addSubview(appearancePopup)
-        settingsView.addSubview(languageLabel)
-        settingsView.addSubview(languagePopup)
-        settingsView.addSubview(automaticWarmup)
-        settingsView.addSubview(launchAtLogin)
+        baseLabel.frame = NSRect(x: 0, y: 366, width: 340, height: 18)
+        baseField.frame = NSRect(x: 0, y: 338, width: 340, height: 24)
+        keyLabel.frame = NSRect(x: 0, y: 312, width: 340, height: 18)
+        keyField.frame = NSRect(x: 0, y: 284, width: 340, height: 24)
+        claudeBaseLabel.frame = NSRect(x: 0, y: 256, width: 340, height: 18)
+        claudeBaseField.frame = NSRect(x: 0, y: 228, width: 340, height: 24)
+        claudeKeyLabel.frame = NSRect(x: 0, y: 202, width: 340, height: 18)
+        claudeKeyField.frame = NSRect(x: 0, y: 174, width: 340, height: 24)
+        autoRefreshLabel.frame = NSRect(x: 0, y: 140, width: 150, height: 22)
+        autoRefreshPopup.frame = NSRect(x: 156, y: 138, width: 184, height: 26)
+        appearanceLabel.frame = NSRect(x: 0, y: 112, width: 150, height: 22)
+        appearancePopup.frame = NSRect(x: 156, y: 110, width: 184, height: 26)
+        languageLabel.frame = NSRect(x: 0, y: 84, width: 150, height: 22)
+        languagePopup.frame = NSRect(x: 156, y: 82, width: 184, height: 26)
+        automaticWarmup.frame = NSRect(x: 0, y: 52, width: 340, height: 22)
+        claudeAutomaticWarmup.frame = NSRect(x: 0, y: 26, width: 340, height: 22)
+        launchAtLogin.frame = NSRect(x: 0, y: 0, width: 340, height: 22)
+        [baseLabel, baseField, keyLabel, keyField, claudeBaseLabel, claudeBaseField, claudeKeyLabel, claudeKeyField,
+         autoRefreshLabel, autoRefreshPopup, appearanceLabel, appearancePopup, languageLabel, languagePopup,
+         automaticWarmup, claudeAutomaticWarmup, launchAtLogin].forEach(settingsView.addSubview)
 
         let alert = NSAlert()
         alert.messageText = isInitialSetup ? L.text("GrandeBar Setup", "GrandeBar Kurulum") : L.text("GrandeBar Settings", "GrandeBar Ayarlar")
         alert.informativeText = isInitialSetup
             ? L.text("Enter the CLIProxyAPI Management Center URL and management key.", "CLIProxyAPI Management Center URL ve management key gir.")
-            : L.text("Panel URL and management key are stored here.", "Panel adresi ve management key burada saklanır.")
+            : L.text("Panel URLs and management keys are stored here.", "Panel adresleri ve management key'ler burada saklanır.")
         alert.accessoryView = settingsView
         alert.addButton(withTitle: L.text("Save", "Kaydet"))
         alert.addButton(withTitle: L.text("Cancel", "İptal"))
@@ -801,18 +938,28 @@ final class QuotaViewController: NSViewController {
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn {
             let managementKey = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let claudeManagementKey = claudeKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             UserDefaults.standard.set(AppConfig.normalizedBase(baseField.stringValue), forKey: AppConfig.apiBaseKey)
             UserDefaults.standard.set(managementKey, forKey: AppConfig.defaultsKey)
+            UserDefaults.standard.set(AppConfig.normalizedBase(claudeBaseField.stringValue), forKey: AppConfig.claudeAPIBaseKey)
+            UserDefaults.standard.set(claudeManagementKey, forKey: AppConfig.claudeManagementKeyKey)
             UserDefaults.standard.set(autoRefreshPopup.selectedItem?.representedObject as? Int ?? 0, forKey: AppConfig.autoRefreshMinutesKey)
             UserDefaults.standard.set(appearancePopup.selectedItem?.representedObject as? String ?? "auto", forKey: AppConfig.appearanceKey)
             UserDefaults.standard.set(languagePopup.selectedItem?.representedObject as? String ?? "auto", forKey: AppConfig.languageKey)
             UserDefaults.standard.set(automaticWarmup.state == .on, forKey: AppConfig.automaticWarmupKey)
+            UserDefaults.standard.set(claudeAutomaticWarmup.state == .on, forKey: AppConfig.claudeAutomaticWarmupKey)
             UserDefaults.standard.synchronize()
             reloadViewForAppearance()
             updateAutoRefreshTimer()
-            updateAutomaticWarmupSchedule(cards: latestCards)
+            for mode in AppMode.allCases {
+                if let cards = cardsByMode[mode] {
+                    updateAutomaticWarmupSchedule(mode: mode, cards: cards)
+                } else if mode != AppConfig.mode() {
+                    automaticWarmupCheck(mode: mode)
+                }
+            }
             setLaunchAtLogin(launchAtLogin.state == .on)
-            if refreshAfterSave && !managementKey.isEmpty {
+            if refreshAfterSave && AppConfig.hasManagementKey() {
                 refreshQuota()
             }
         }
@@ -858,9 +1005,11 @@ final class QuotaViewController: NSViewController {
     }
 
     private func refreshLocalUsage() {
+        let mode = AppConfig.mode()
         DispatchQueue.global(qos: .utility).async {
-            let usage = LocalCodexUsage.read()
+            let usage = mode == .claude ? LocalClaudeUsage.read() : LocalCodexUsage.read()
             DispatchQueue.main.async {
+                guard mode == AppConfig.mode() else { return }
                 if let usage {
                     self.latestUsage = usage
                     self.usageLabel.stringValue = self.usageLineText(usage)
@@ -902,10 +1051,10 @@ final class QuotaViewController: NSViewController {
         autoRefreshTimer = timer
     }
 
-    private func updateAutomaticWarmupSchedule(cards: [QuotaCard]) {
-        automaticWarmupTimer?.invalidate()
-        automaticWarmupTimer = nil
-        guard AppConfig.automaticWarmupEnabled(), AppConfig.hasManagementKey(), !cards.isEmpty else { return }
+    private func updateAutomaticWarmupSchedule(mode: AppMode, cards: [QuotaCard]) {
+        automaticWarmupTimers[mode]?.invalidate()
+        automaticWarmupTimers[mode] = nil
+        guard AppConfig.automaticWarmupEnabled(for: mode), AppConfig.hasManagementKey(for: mode), !cards.isEmpty else { return }
 
         let eligible = cards.filter { !$0.isLocked }
         guard !eligible.isEmpty else { return }
@@ -921,26 +1070,52 @@ final class QuotaViewController: NSViewController {
         } else {
             delay = 15 * 60
         }
+        scheduleAutomaticWarmup(mode: mode, after: delay)
+    }
 
+    private func scheduleAutomaticWarmup(mode: AppMode, after delay: TimeInterval) {
+        automaticWarmupTimers[mode]?.invalidate()
         let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
-            self?.automaticWarmupCheck()
+            self?.automaticWarmupCheck(mode: mode)
         }
         timer.tolerance = min(30, max(1, delay * 0.01))
         RunLoop.main.add(timer, forMode: .common)
-        automaticWarmupTimer = timer
+        automaticWarmupTimers[mode] = timer
     }
 
-    private func automaticWarmupCheck() {
-        guard AppConfig.automaticWarmupEnabled(), AppConfig.hasManagementKey() else { return }
+    private func automaticWarmupCheck(mode: AppMode) {
+        guard AppConfig.automaticWarmupEnabled(for: mode), AppConfig.hasManagementKey(for: mode) else { return }
+        guard mode == AppConfig.mode() else {
+            backgroundWarmup(mode: mode)
+            return
+        }
         guard !isRefreshing, !isWarming else {
-            let timer = Timer(timeInterval: 30, repeats: false) { [weak self] _ in
-                self?.automaticWarmupCheck()
-            }
-            RunLoop.main.add(timer, forMode: .common)
-            automaticWarmupTimer = timer
+            scheduleAutomaticWarmup(mode: mode, after: 30)
             return
         }
         warmSessionsClicked()
+    }
+
+    /// Warms and re-schedules a mode that is not on screen without touching the visible cards.
+    private func backgroundWarmup(mode: AppMode) {
+        guard backgroundWarmups[mode] == nil else { return }
+        let warmup = SessionWarmupAPI(mode: mode)
+        backgroundWarmups[mode] = warmup
+        warmup.warmEligibleAccounts { [weak self] _ in
+            QuotaAPI(mode: mode).fetchQuota { result in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.backgroundWarmups[mode] = nil
+                    switch result {
+                    case .success(let cards):
+                        self.cardsByMode[mode] = cards
+                        self.updateAutomaticWarmupSchedule(mode: mode, cards: cards)
+                    case .failure:
+                        self.scheduleAutomaticWarmup(mode: mode, after: 15 * 60)
+                    }
+                }
+            }
+        }
     }
 
     private func updateLastRefreshLabel() {
@@ -959,13 +1134,15 @@ final class QuotaViewController: NSViewController {
     private func render(cards: [QuotaCard]) {
         clearCards()
 
+        let mode = AppConfig.mode()
         if cards.isEmpty {
-            renderError(L.text("No Codex credentials found", "Codex hesabı bulunamadı"))
+            renderError(L.text("No \(mode.title) credentials found", "\(mode.title) hesabı bulunamadı"))
             return
         }
 
         latestCards = cards
-        updateAutomaticWarmupSchedule(cards: cards)
+        cardsByMode[mode] = cards
+        updateAutomaticWarmupSchedule(mode: mode, cards: cards)
         subtitleLabel.stringValue = summaryText(for: cards)
         setDetailLine(detailText(for: cards))
         let summary = totalLimitSummary(for: cards)
@@ -973,7 +1150,15 @@ final class QuotaViewController: NSViewController {
         let tooltip = cards.map { "\($0.name): \($0.sessionPercent.map(String.init) ?? "--")% session, \($0.weeklyPercent.map(String.init) ?? "--")% weekly" }.joined(separator: "\n")
         statusUpdate(title, tooltip)
 
-        let totalView = TotalLimitCardView(summary: summary)
+        if mode == .claude {
+            let providerView = ProviderSwitchCardView { [weak self] proxy in
+                self?.switchClaudeProvider(proxy: proxy)
+            }
+            stackView.addArrangedSubview(providerView)
+            providerView.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
+        }
+
+        let totalView = TotalLimitCardView(summary: summary, weeklyTitle: weeklyPoolTitle(for: cards))
         totalView.translatesAutoresizingMaskIntoConstraints = false
         stackView.addArrangedSubview(totalView)
         totalView.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
@@ -987,11 +1172,27 @@ final class QuotaViewController: NSViewController {
         resizeDocument(rowCount: cards.count + 1)
     }
 
+    /// Claude accounts without a general weekly limit report a model-scoped one (Fable).
+    private func weeklyPoolTitle(for cards: [QuotaCard]) -> String? {
+        let labels = Set(cards.compactMap(\.weeklyLabel))
+        guard labels.count == 1, let label = labels.first else { return nil }
+        return L.text("\(label) pool", "\(label) havuzu")
+    }
+
     private func renderError(_ message: String) {
         clearCards()
         subtitleLabel.stringValue = L.text("Could not load quota", "Kota yüklenemedi")
         setDetailLine(nil)
         statusUpdate(message.contains("IP banned") ? "ban" : "err", message)
+
+        // Keep the provider switch reachable when the proxy is down, so Claude can go back to Official.
+        if AppConfig.mode() == .claude {
+            let providerView = ProviderSwitchCardView { [weak self] proxy in
+                self?.switchClaudeProvider(proxy: proxy)
+            }
+            stackView.addArrangedSubview(providerView)
+            providerView.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
+        }
 
         let box = RoundedView(color: Theme.errorBackground, radius: 16, borderColor: Theme.border)
         box.translatesAutoresizingMaskIntoConstraints = false
@@ -1032,10 +1233,15 @@ final class QuotaViewController: NSViewController {
 
     private func resizeDocument(rowCount: Int) {
         let rows = max(1, rowCount)
-        let rowsHeight = rowCount <= 1
+        var rowsHeight = rowCount <= 1
             ? CGFloat(rows) * 96
             : UI.summaryCardHeight + CGFloat(rows - 1) * UI.accountCardHeight
-        let contentHeight = rowsHeight + CGFloat(max(0, rows - 1)) * stackView.spacing
+        var gaps = max(0, rows - 1)
+        if stackView.arrangedSubviews.contains(where: { $0 is ProviderSwitchCardView }) {
+            rowsHeight += UI.providerCardHeight
+            gaps += 1
+        }
+        let contentHeight = rowsHeight + CGFloat(gaps) * stackView.spacing
         let width = max(UI.popoverWidth, scrollView.contentSize.width)
         stackView.setFrameSize(NSSize(width: width, height: max(scrollView.contentSize.height + 1, contentHeight)))
         stackView.needsLayout = true
@@ -1057,6 +1263,10 @@ final class QuotaViewController: NSViewController {
 
     /// Primary header line (classic, short): `6 account · 12 reset`
     private func summaryText(for cards: [QuotaCard]) -> String {
+        if AppConfig.mode() == .claude {
+            let plans = Array(Set(cards.compactMap(\.headline))).sorted().joined(separator: ", ")
+            return L.text("\(cards.count) account · \(plans)", "\(cards.count) hesap · \(plans)")
+        }
         let resetTotal = cards.compactMap(\.resetCreditsAvailableCount).reduce(0, +)
         return L.text("\(cards.count) account · \(resetTotal) reset", "\(cards.count) hesap · \(resetTotal) reset")
     }
@@ -1187,6 +1397,12 @@ final class QuotaViewController: NSViewController {
             .sorted(by: sortCards)
             .map { "- \(compactAccountName($0.name)): \(L.text("session", "oturum")) \(percentText($0.sessionPercent)), \(L.text("weekly", "haftalık")) \(percentText($0.weeklyPercent))" }
             .joined(separator: "\n")
+        if AppConfig.mode() == .claude {
+            return L.text(
+                "\(usageLine)\nClaude remaining total: session \(sessionPoolTitle(summary)), weekly \(weeklyTotal).\nAccount remaining:\n\(accounts)",
+                "\(usageLine)\nClaude toplam kalan: oturum \(sessionPoolTitle(summary)), haftalık \(weeklyTotal).\nHesaplarda kalan:\n\(accounts)"
+            )
+        }
         let resetTotal = latestCards.compactMap(\.resetCreditsAvailableCount).reduce(0, +)
         let closestReset = earliestResetExpiry(in: latestCards)
             .map { "\(formatExpiry($0.date)) (\(compactAccountName($0.name)))" } ?? "--"
@@ -1259,7 +1475,7 @@ private final class AccountCardView: RoundedView {
 
         let accent = NSView()
         accent.wantsLayer = true
-        accent.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.82).cgColor
+        accent.layer?.backgroundColor = Theme.accent.withAlphaComponent(0.82).cgColor
         accent.translatesAutoresizingMaskIntoConstraints = false
 
         let name = NSTextField(labelWithString: compactName(card.name))
@@ -1285,7 +1501,7 @@ private final class AccountCardView: RoundedView {
         resetExpiry.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
 
         let session = MetricView(title: L.text("Session 5h", "Oturum 5s"), percent: card.sessionPercent, resetSeconds: card.sessionResetSeconds)
-        let weekly = MetricView(title: L.text("Weekly", "Haftalık"), percent: card.weeklyPercent, resetSeconds: card.weeklyResetSeconds)
+        let weekly = MetricView(title: card.weeklyLabel ?? L.text("Weekly", "Haftalık"), percent: card.weeklyPercent, resetSeconds: card.weeklyResetSeconds)
         session.translatesAutoresizingMaskIntoConstraints = false
         weekly.translatesAutoresizingMaskIntoConstraints = false
 
@@ -1346,11 +1562,13 @@ private final class AccountCardView: RoundedView {
     }
 
     private func resetCountText(_ card: QuotaCard) -> String {
+        if let headline = card.headline { return headline }
         let count = card.resetCreditsAvailableCount.map(String.init) ?? "--"
         return L.text("Reset \(count)", "Reset \(count) adet")
     }
 
     private func resetExpiryText(_ card: QuotaCard) -> String {
+        if let subline = card.subline { return subline }
         let futureExpiries = card.resetCreditExpiries.filter { $0 > Date() }.sorted()
         guard let first = futureExpiries.first ?? card.resetCreditExpiries.sorted().first else {
             return "--"
@@ -1368,13 +1586,13 @@ private final class AccountCardView: RoundedView {
 }
 
 private final class TotalLimitCardView: RoundedView {
-    init(summary: TotalLimitSummary) {
+    init(summary: TotalLimitSummary, weeklyTitle: String? = nil) {
         super.init(color: Theme.cardBackground, radius: 8, borderColor: Theme.border)
 
         let sessionPercent = percent(remaining: summary.sessionRemaining, total: summary.sessionTotal)
         let weeklyPercent = percent(remaining: summary.weeklyRemaining, total: summary.weeklyTotal)
         let session = TotalMetricView(title: L.text("Session pool", "Oturum havuzu"), value: valueText(sessionPercent), detail: L.text("total remaining", "toplam kalan"), percent: sessionPercent, tint: color(for: sessionPercent))
-        let weekly = TotalMetricView(title: L.text("Weekly pool", "Haftalık havuz"), value: valueText(weeklyPercent), detail: L.text("total remaining", "toplam kalan"), percent: weeklyPercent, tint: color(for: weeklyPercent))
+        let weekly = TotalMetricView(title: weeklyTitle ?? L.text("Weekly pool", "Haftalık havuz"), value: valueText(weeklyPercent), detail: L.text("total remaining", "toplam kalan"), percent: weeklyPercent, tint: color(for: weeklyPercent))
         let divider = divider()
         session.translatesAutoresizingMaskIntoConstraints = false
         weekly.translatesAutoresizingMaskIntoConstraints = false
@@ -1887,11 +2105,15 @@ private final class SessionWarmupAPI {
     private let progressThresholdSeconds = 120
     private let responsesURL = "https://chatgpt.com/backend-api/codex/responses"
     private let usageURL = "https://chatgpt.com/backend-api/wham/usage"
+    private let mode: AppMode
+
+    init(mode: AppMode) {
+        self.mode = mode
+    }
 
     func warmEligibleAccounts(completion: @escaping (Result<SessionWarmupSummary, Error>) -> Void) {
-        guard let managementKey = UserDefaults.standard.string(forKey: AppConfig.defaultsKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !managementKey.isEmpty else {
+        let managementKey = AppConfig.managementKey(for: mode)
+        guard !managementKey.isEmpty else {
             completion(.failure(NSError(
                 domain: "GrandeBar",
                 code: 1,
@@ -1908,6 +2130,7 @@ private final class SessionWarmupAPI {
             case .success(let json):
                 let files = (json["files"] as? [[String: Any]] ?? [])
                     .filter { ($0["disabled"] as? Bool) != true }
+                    .filter { ClaudeAPI.belongs($0, to: self.mode) }
                 guard !files.isEmpty else {
                     completion(.success(SessionWarmupSummary(results: [])))
                     return
@@ -1935,7 +2158,7 @@ private final class SessionWarmupAPI {
 
         let file = files[index]
         let authIndex = (file["auth_index"] as? String) ?? (file["authIndex"] as? String) ?? ""
-        let account = (file["account"] as? String) ?? (file["name"] as? String) ?? authIndex
+        let account = (file["account"] as? String) ?? (file["email"] as? String) ?? (file["name"] as? String) ?? authIndex
         let authFileName = (file["name"] as? String) ?? ""
         guard !authIndex.isEmpty else {
             warmFiles(files, index: index + 1, managementKey: managementKey, acc: acc + [
@@ -2080,6 +2303,10 @@ private final class SessionWarmupAPI {
     }
 
     private func fetchUsage(authIndex: String, managementKey: String, completion: @escaping (Result<UsageProbe, Error>) -> Void) {
+        if mode == .claude {
+            fetchClaudeUsage(authIndex: authIndex, managementKey: managementKey, completion: completion)
+            return
+        }
         let payload: [String: Any] = [
             "authIndex": authIndex,
             "method": "GET",
@@ -2128,6 +2355,10 @@ private final class SessionWarmupAPI {
         managementKey: String,
         completion: @escaping (Result<String, Error>) -> Void
     ) {
+        if mode == .claude {
+            sendClaudeWarmRequest(authIndex: authIndex, managementKey: managementKey, completion: completion)
+            return
+        }
         var headers: [String: String] = [
             "Authorization": "Bearer $TOKEN$",
             "Content-Type": "application/json",
@@ -2200,6 +2431,74 @@ private final class SessionWarmupAPI {
         }
     }
 
+    private func fetchClaudeUsage(authIndex: String, managementKey: String, completion: @escaping (Result<UsageProbe, Error>) -> Void) {
+        let payload: [String: Any] = ["authIndex": authIndex, "method": "GET", "url": ClaudeAPI.usageURL, "header": ClaudeAPI.headers]
+        apiJSON(path: "/api-call", method: "POST", payload: payload, managementKey: managementKey) { result in
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let json):
+                if let status = json["status_code"] as? Int, status < 200 || status >= 300 {
+                    let body = json["body"] as? String ?? "HTTP \(status)"
+                    completion(.failure(NSError(domain: "GrandeBar", code: status, userInfo: [NSLocalizedDescriptionKey: body])))
+                    return
+                }
+                let body = json["body"] as? [String: Any] ?? self.parseJSONString(json["body"] as? String)
+                let quota = ClaudeQuota.parse(body)
+                completion(.success(UsageProbe(
+                    accountId: nil,
+                    allowed: nil,
+                    limitReached: quota.limitReached,
+                    usedPercent: quota.sessionRemaining.map { 100 - $0 },
+                    sessionResetSeconds: quota.sessionResetSeconds,
+                    limitType: nil
+                )))
+            }
+        }
+    }
+
+    /// One-token Haiku request: Claude starts the 5h window on the first message.
+    private func sendClaudeWarmRequest(authIndex: String, managementKey: String, completion: @escaping (Result<String, Error>) -> Void) {
+        let body: [String: Any] = [
+            "model": ClaudeAPI.warmModel,
+            "max_tokens": 1,
+            "system": [["type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."]],
+            "messages": [["role": "user", "content": "hi"]]
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: body),
+              let dataString = String(data: data, encoding: .utf8) else {
+            completion(.failure(NSError(domain: "GrandeBar", code: 10, userInfo: [NSLocalizedDescriptionKey: L.text("Could not build warm request", "Warm isteği oluşturulamadı")])))
+            return
+        }
+        var headers = ClaudeAPI.headers
+        headers["anthropic-version"] = "2023-06-01"
+        headers["anthropic-beta"] = "oauth-2025-04-20,claude-code-20250219"
+        headers["x-app"] = "cli"
+        let payload: [String: Any] = [
+            "authIndex": authIndex,
+            "method": "POST",
+            "url": ClaudeAPI.messagesURL,
+            "header": headers,
+            "data": dataString
+        ]
+        apiJSON(path: "/api-call", method: "POST", payload: payload, managementKey: managementKey, timeout: 120) { result in
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let json):
+                let status = json["status_code"] as? Int ?? 0
+                let rawBody = json["body"] as? String ?? ""
+                guard (200..<300).contains(status) else {
+                    completion(.failure(NSError(domain: "GrandeBar", code: status, userInfo: [NSLocalizedDescriptionKey: "HTTP \(status): \(rawBody.prefix(200))"])))
+                    return
+                }
+                let usage = self.parseJSONString(rawBody)["usage"] as? [String: Any] ?? [:]
+                let tokens = (self.intValue(usage["input_tokens"]) ?? 0) + (self.intValue(usage["output_tokens"]) ?? 0)
+                completion(.success(tokens > 0 ? L.text("opened · \(tokens) tok", "açıldı · \(tokens) tok") : L.text("opened", "açıldı")))
+            }
+        }
+    }
+
     private func extractTotalTokens(from sseBody: String) -> Int? {
         for line in sseBody.split(separator: "\n", omittingEmptySubsequences: false) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -2232,7 +2531,7 @@ private final class SessionWarmupAPI {
         timeout: TimeInterval = 60,
         completion: @escaping (Result<[String: Any], Error>) -> Void
     ) {
-        guard let url = URL(string: "\(AppConfig.apiBase())/v0/management\(path)") else {
+        guard let url = URL(string: "\(AppConfig.apiBase(for: mode))/v0/management\(path)") else {
             completion(.failure(NSError(domain: "GrandeBar", code: 3, userInfo: [NSLocalizedDescriptionKey: L.text("Base URL is invalid", "Base URL geçersiz")])))
             return
         }
@@ -2283,15 +2582,21 @@ private final class SessionWarmupAPI {
 }
 
 private final class QuotaAPI {
+    private let mode: AppMode
+
+    init(mode: AppMode) {
+        self.mode = mode
+    }
+
     func fetchQuota(completion: @escaping (Result<[QuotaCard], Error>) -> Void) {
-        guard let managementKey = UserDefaults.standard.string(forKey: AppConfig.defaultsKey)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !managementKey.isEmpty else {
+        let managementKey = AppConfig.managementKey(for: mode)
+        guard !managementKey.isEmpty else {
             completion(.failure(NSError(domain: "GrandeBar", code: 1, userInfo: [NSLocalizedDescriptionKey: L.text("Management key is missing", "Management key eksik")])))
             return
         }
 
-        apiJSON(path: "/auth-files", managementKey: managementKey) { [weak self] result in
-            guard let self else { return }
+        // Strong self is intentional: callers create a QuotaAPI per refresh and do not retain it.
+        apiJSON(path: "/auth-files", managementKey: managementKey) { result in
             switch result {
             case .failure(let error):
                 completion(.failure(error))
@@ -2299,6 +2604,7 @@ private final class QuotaAPI {
                 let files = (json["files"] as? [[String: Any]] ?? [])
                     .filter { ($0["disabled"] as? Bool) != true }
                     .filter { (($0["auth_index"] as? String) ?? ($0["authIndex"] as? String)) != nil }
+                    .filter { ClaudeAPI.belongs($0, to: self.mode) }
 
                 let group = DispatchGroup()
                 let lock = NSLock()
@@ -2308,7 +2614,8 @@ private final class QuotaAPI {
                 for file in files {
                     guard let authIndex = (file["auth_index"] as? String) ?? (file["authIndex"] as? String) else { continue }
                     group.enter()
-                    self.fetchCodexUsage(authIndex: authIndex, file: file, managementKey: managementKey) { result in
+                    let fetch = self.mode == .claude ? self.fetchClaudeUsage : self.fetchCodexUsage
+                    fetch(authIndex, file, managementKey) { result in
                         defer { group.leave() }
                         lock.lock()
                         defer { lock.unlock() }
@@ -2377,6 +2684,54 @@ private final class QuotaAPI {
         }
     }
 
+    private func fetchClaudeUsage(authIndex: String, file: [String: Any], managementKey: String, completion: @escaping (Result<QuotaCard, Error>) -> Void) {
+        let name = (file["email"] as? String) ?? (file["account"] as? String) ?? (file["name"] as? String) ?? authIndex
+        claudeCall(authIndex: authIndex, url: ClaudeAPI.usageURL, managementKey: managementKey) { usageResult in
+            switch usageResult {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let usage):
+                self.claudeCall(authIndex: authIndex, url: ClaudeAPI.profileURL, managementKey: managementKey) { profileResult in
+                    let quota = ClaudeQuota.parse(usage)
+                    let plan = ClaudeAPI.planLabel((try? profileResult.get()) ?? [:])
+                    completion(.success(QuotaCard(
+                        name: name,
+                        plan: plan,
+                        sessionPercent: quota.sessionRemaining,
+                        sessionResetSeconds: quota.sessionResetSeconds,
+                        weeklyPercent: quota.weeklyRemaining,
+                        weeklyResetSeconds: quota.weeklyResetSeconds,
+                        resetCreditsAvailableCount: nil,
+                        resetCreditExpiries: [],
+                        allowed: nil,
+                        limitReached: quota.limitReached,
+                        updatedAt: Date(),
+                        weeklyLabel: quota.weeklyLabel,
+                        headline: plan,
+                        subline: quota.weeklyResetDate.map(ClaudeAPI.formatDate) ?? "--"
+                    )))
+                }
+            }
+        }
+    }
+
+    private func claudeCall(authIndex: String, url: String, managementKey: String, completion: @escaping (Result<[String: Any], Error>) -> Void) {
+        let payload: [String: Any] = ["authIndex": authIndex, "method": "GET", "url": url, "header": ClaudeAPI.headers]
+        apiJSON(path: "/api-call", method: "POST", payload: payload, managementKey: managementKey) { result in
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let json):
+                if let status = json["status_code"] as? Int, status < 200 || status >= 300 {
+                    let body = json["body"] as? String ?? "HTTP \(status)"
+                    completion(.failure(NSError(domain: "GrandeBar", code: status, userInfo: [NSLocalizedDescriptionKey: body])))
+                    return
+                }
+                completion(.success(json["body"] as? [String: Any] ?? self.parseJSONString(json["body"] as? String)))
+            }
+        }
+    }
+
     private func fetchResetCredits(authIndex: String, managementKey: String, completion: @escaping (ResetCreditsInfo) -> Void) {
         let payload: [String: Any] = [
             "authIndex": authIndex,
@@ -2411,7 +2766,7 @@ private final class QuotaAPI {
     }
 
     private func apiJSON(path: String, method: String = "GET", payload: [String: Any]? = nil, managementKey: String, completion: @escaping (Result<[String: Any], Error>) -> Void) {
-        guard let url = URL(string: "\(AppConfig.apiBase())/v0/management\(path)") else {
+        guard let url = URL(string: "\(AppConfig.apiBase(for: mode))/v0/management\(path)") else {
             completion(.failure(NSError(domain: "GrandeBar", code: 3, userInfo: [NSLocalizedDescriptionKey: L.text("Base URL is invalid", "Base URL geçersiz")])))
             return
         }
@@ -2539,5 +2894,531 @@ private final class QuotaAPI {
         if normalized.contains("pro") { return "Pro" }
         if normalized.contains("free") { return "Free" }
         return normalized.isEmpty ? "Team" : normalized.capitalized
+    }
+}
+
+// MARK: - Claude mode
+
+private enum ClaudeAPI {
+    static let usageURL = "https://api.anthropic.com/api/oauth/usage"
+    static let profileURL = "https://api.anthropic.com/api/oauth/profile"
+    static let messagesURL = "https://api.anthropic.com/v1/messages?beta=true"
+    static let warmModel = "claude-haiku-4-5"
+    static let headers: [String: String] = [
+        "Authorization": "Bearer $TOKEN$",
+        "Content-Type": "application/json",
+        "anthropic-beta": "oauth-2025-04-20",
+        "User-Agent": "claude-cli/2.1.280 (external, cli)"
+    ]
+
+    /// Codex mode keeps every non-Claude credential so existing Codex setups behave as before.
+    static func belongs(_ file: [String: Any], to mode: AppMode) -> Bool {
+        let provider = ((file["provider"] as? String) ?? (file["type"] as? String) ?? "").lowercased()
+        return mode == .claude ? provider == "claude" : provider != "claude"
+    }
+
+    static func planLabel(_ profile: [String: Any]) -> String {
+        let org = profile["organization"] as? [String: Any] ?? [:]
+        let account = profile["account"] as? [String: Any] ?? [:]
+        let type = (org["organization_type"] as? String ?? "").lowercased()
+        let tier = (org["rate_limit_tier"] as? String ?? "").lowercased()
+        var label = "Claude"
+        if type.contains("team") { label = "Team" }
+        else if type.contains("enterprise") { label = "Enterprise" }
+        else if (account["has_claude_max"] as? Bool) == true { label = "Max" }
+        else if (account["has_claude_pro"] as? Bool) == true { label = "Pro" }
+        if tier.contains("max_20x") { label += " 20x" } else if tier.contains("max_5x") { label += " 5x" }
+        return label
+    }
+
+    static func formatDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: L.isTurkish ? "tr_TR" : "en_US_POSIX")
+        formatter.dateFormat = L.isTurkish ? "d MMM HH:mm" : "MMM d HH:mm"
+        return formatter.string(from: date)
+    }
+}
+
+/// Remaining percentages from `/api/oauth/usage`. Prefers the `limits` array (percent = used)
+/// and falls back to the per-window fields (utilization = used).
+private struct ClaudeQuota {
+    var sessionRemaining: Int?
+    var sessionResetSeconds: Int?
+    var weeklyRemaining: Int?
+    var weeklyResetSeconds: Int?
+    var weeklyResetDate: Date?
+    /// nil for the general weekly limit; the model name for a model-scoped one.
+    var weeklyLabel: String?
+    var limitReached = false
+
+    static func parse(_ usage: [String: Any]) -> ClaudeQuota {
+        typealias Window = (remaining: Int?, resets: Date?)
+        var session: Window?
+        var general: Window?
+        var scoped: [(label: String, window: Window)] = []
+
+        for limit in usage["limits"] as? [[String: Any]] ?? [] {
+            let used = int(limit["percent"])
+            let window: Window = (used.map { max(0, min(100, 100 - $0)) }, (limit["resets_at"] as? String).flatMap(date))
+            let kind = limit["kind"] as? String ?? ""
+            let group = limit["group"] as? String ?? ""
+            let model = ((limit["scope"] as? [String: Any])?["model"] as? [String: Any])?["display_name"] as? String
+            if kind == "session" || group == "session" {
+                session = window
+            } else if group == "weekly" {
+                if let model { scoped.append((model, window)) } else { general = window }
+            }
+        }
+
+        func legacy(_ key: String) -> Window? {
+            guard let window = usage[key] as? [String: Any], let used = int(window["utilization"]) else { return nil }
+            return (max(0, min(100, 100 - used)), (window["resets_at"] as? String).flatMap(date))
+        }
+        session = session ?? legacy("five_hour")
+        general = general ?? legacy("seven_day")
+        if scoped.isEmpty, let fable = legacy("seven_day_fable") {
+            scoped.append(("Fable", fable))
+        }
+
+        var quota = ClaudeQuota()
+        quota.sessionRemaining = session?.remaining
+        quota.sessionResetSeconds = session?.resets.map { max(0, Int($0.timeIntervalSinceNow)) }
+        let weekly: Window?
+        if let general {
+            weekly = general
+        } else if let pick = scoped.first(where: { $0.label.lowercased().contains("fable") }) ?? scoped.first {
+            weekly = pick.window
+            quota.weeklyLabel = pick.label
+        } else {
+            weekly = nil
+        }
+        quota.weeklyRemaining = weekly?.remaining
+        quota.weeklyResetDate = weekly?.resets
+        quota.weeklyResetSeconds = weekly?.resets.map { max(0, Int($0.timeIntervalSinceNow)) }
+        let locked = ((usage["five_hour"] as? [String: Any])?["locked_reason"] as? String).map { !$0.isEmpty } ?? false
+        quota.limitReached = locked || quota.sessionRemaining == 0 || quota.weeklyRemaining == 0
+        return quota
+    }
+
+    private static func int(_ value: Any?) -> Int? {
+        if let number = value as? NSNumber { return Int(number.doubleValue.rounded()) }
+        if let string = value as? String, let number = Double(string) { return Int(number.rounded()) }
+        return nil
+    }
+
+    private static func date(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+    }
+}
+
+/// Claude Code cost from `ccusage claude daily`. Online pricing on purpose: the offline table
+/// lacks current Claude models and reports $0 for them.
+private enum LocalClaudeUsage {
+    static func read() -> LocalUsage? {
+        let dates = dateKeys()
+        let since = min(dates.weekStart, dates.monthStart)
+        guard let json = ccusageJSON(since: since),
+              let rows = json["daily"] as? [[String: Any]] else { return nil }
+
+        var today = 0.0, week = 0.0, month = 0.0
+        var models = Set<String>()
+        for row in rows {
+            guard let date = row["date"] as? String,
+                  let cost = double(row["totalCost"] ?? row["costUSD"]), cost.isFinite, cost >= 0 else { continue }
+            if date == dates.today { today += cost }
+            if date >= dates.weekStart {
+                week += cost
+                for breakdown in row["modelBreakdowns"] as? [[String: Any]] ?? [] {
+                    if let name = breakdown["modelName"] as? String { models.insert(family(name)) }
+                }
+            }
+            if date >= dates.monthStart { month += cost }
+        }
+        return LocalUsage(today: today, week: week, month: month, models: models.sorted())
+    }
+
+    private static func ccusageJSON(since: String) -> [String: Any]? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let candidates = ["\(home)/.npm-global/bin/ccusage", "/opt/homebrew/bin/ccusage", "/usr/local/bin/ccusage"]
+        guard let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else { return nil }
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = ["claude", "daily", "--json", "--timezone", TimeZone.current.identifier, "--since", since]
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "\(home)/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:\(environment["PATH"] ?? "")"
+        process.environment = environment
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private static func family(_ model: String) -> String {
+        let lowercased = model.lowercased()
+        for name in ["fable", "opus", "sonnet", "haiku"] where lowercased.contains(name) {
+            return name.uppercased()
+        }
+        return model.uppercased()
+    }
+
+    private static func dateKeys() -> (today: String, weekStart: String, monthStart: String) {
+        let now = Date()
+        var calendar = Calendar(identifier: .iso8601)
+        calendar.timeZone = .current
+        let today = calendar.startOfDay(for: now)
+        let weekStart = calendar.dateInterval(of: .weekOfYear, for: now)?.start ?? today
+        let monthStart = calendar.dateInterval(of: .month, for: now)?.start ?? today
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .iso8601)
+        formatter.timeZone = .current
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return (formatter.string(from: today), formatter.string(from: weekStart), formatter.string(from: monthStart))
+    }
+
+    private static func double(_ value: Any?) -> Double? {
+        if let number = value as? NSNumber { return number.doubleValue }
+        if let string = value as? String { return Double(string) }
+        return nil
+    }
+}
+
+// MARK: - Claude provider switch (Claude Desktop + Claude Code)
+
+private enum ProviderMode {
+    case official, proxy, other
+
+    var label: String {
+        switch self {
+        case .official: return L.text("Official", "Resmi")
+        case .proxy: return "CLIProxy"
+        case .other: return L.text("Other", "Diğer")
+        }
+    }
+}
+
+/// Writes Claude Desktop's third-party gateway profile (same layout CC Switch uses, under our
+/// own profile id) and the Claude Code `env` override. Every file is backed up once before the
+/// first change as `<file>.grandebar.bak`.
+private enum ClaudeProviderSwitcher {
+    static let profileID = "4c1b2a10-5e1d-4000-8000-00000c11b0a1"
+    static let profileName = "GrandeBar CLIProxy"
+    static let desktopBundleID = "com.anthropic.claudefordesktop"
+    private static let gatewayKeys = ["inferenceGatewayApiKey", "inferenceGatewayAuthScheme", "inferenceGatewayBaseUrl", "inferenceProvider", "disableDeploymentModeChooser"]
+
+    // GRANDEBAR_CLAUDE_HOME redirects every write to a sandbox directory for dry runs.
+    private static var home: String {
+        ProcessInfo.processInfo.environment["GRANDEBAR_CLAUDE_HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
+    }
+    private static var appSupport: String { home + "/Library/Application Support" }
+    private static var normalConfig: URL { URL(fileURLWithPath: appSupport + "/Claude/claude_desktop_config.json") }
+    private static var threePConfig: URL { URL(fileURLWithPath: appSupport + "/Claude-3p/claude_desktop_config.json") }
+    private static var libraryDir: URL { URL(fileURLWithPath: appSupport + "/Claude-3p/configLibrary") }
+    private static var profileFile: URL { libraryDir.appendingPathComponent("\(profileID).json") }
+    private static var metaFile: URL { libraryDir.appendingPathComponent("_meta.json") }
+    private static var codeSettings: URL { URL(fileURLWithPath: home + "/.claude/settings.json") }
+    private static var proxyBase: String { AppConfig.apiBase(for: .claude) }
+
+    static func desktopMode() -> ProviderMode {
+        guard (readJSON(normalConfig)["deploymentMode"] as? String) == "3p" else { return .official }
+        return (readJSON(metaFile)["appliedId"] as? String) == profileID ? .proxy : .other
+    }
+
+    static func codeMode() -> ProviderMode {
+        let env = readJSON(codeSettings)["env"] as? [String: Any] ?? [:]
+        guard let base = env["ANTHROPIC_BASE_URL"] as? String, !base.isEmpty else { return .official }
+        return AppConfig.normalizedBase(base) == proxyBase ? .proxy : .other
+    }
+
+    /// Proxy client key: first entry of `access.api-keys` via the management API, else the local credentials file.
+    static func resolveAPIKey() -> String? {
+        let managementKey = AppConfig.managementKey(for: .claude)
+        if !managementKey.isEmpty, let url = URL(string: "\(proxyBase)/v0/management/api-keys") {
+            var request = URLRequest(url: url, timeoutInterval: 10)
+            request.setValue("Bearer \(managementKey)", forHTTPHeaderField: "Authorization")
+            let semaphore = DispatchSemaphore(value: 0)
+            var key: String?
+            URLSession.shared.dataTask(with: request) { data, _, _ in
+                if let data,
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    key = (json["api-keys"] as? [String])?.first
+                }
+                semaphore.signal()
+            }.resume()
+            _ = semaphore.wait(timeout: .now() + 12)
+            if let key, !key.isEmpty { return key }
+        }
+        return AppConfig.localCredential("API_KEY")
+    }
+
+    static func apply(proxy: Bool, apiKey: String?) throws {
+        if proxy {
+            guard let apiKey, !apiKey.isEmpty else {
+                throw error(L.text("Proxy API key not found (management api-keys or ~/cliproxyapi/.credentials).", "Proxy API key bulunamadı (management api-keys veya ~/cliproxyapi/.credentials)."))
+            }
+            try patch(normalConfig) { $0["deploymentMode"] = "3p" }
+            try patch(threePConfig) { $0["deploymentMode"] = "3p" }
+            try patch(profileFile, permissions: 0o600) { profile in
+                profile["coworkEgressAllowedHosts"] = ["*"]
+                profile["disableDeploymentModeChooser"] = true
+                profile["inferenceGatewayApiKey"] = apiKey
+                profile["inferenceGatewayAuthScheme"] = "bearer"
+                profile["inferenceGatewayBaseUrl"] = proxyBase
+                profile["inferenceProvider"] = "gateway"
+            }
+            try patch(metaFile) { meta in
+                var entries = meta["entries"] as? [[String: Any]] ?? []
+                if let index = entries.firstIndex(where: { ($0["id"] as? String) == profileID }) {
+                    entries[index]["name"] = profileName
+                } else {
+                    entries.append(["id": profileID, "name": profileName])
+                }
+                meta["entries"] = entries
+                meta["appliedId"] = profileID
+            }
+            try patch(codeSettings) { settings in
+                var env = settings["env"] as? [String: Any] ?? [:]
+                env["ANTHROPIC_BASE_URL"] = proxyBase
+                env["ANTHROPIC_AUTH_TOKEN"] = apiKey
+                settings["env"] = env
+            }
+        } else {
+            try patch(normalConfig) { $0["deploymentMode"] = "1p" }
+            let fm = FileManager.default
+            if fm.fileExists(atPath: threePConfig.path) {
+                try patch(threePConfig) { $0["deploymentMode"] = "1p" }
+            }
+            if fm.fileExists(atPath: metaFile.path) {
+                try patch(metaFile) { meta in
+                    var entries = meta["entries"] as? [[String: Any]] ?? []
+                    entries.removeAll { ($0["id"] as? String) == profileID }
+                    meta["entries"] = entries
+                    if (meta["appliedId"] as? String) == profileID {
+                        if let next = entries.first?["id"] as? String {
+                            meta["appliedId"] = next
+                        } else {
+                            meta.removeValue(forKey: "appliedId")
+                        }
+                    }
+                }
+            }
+            if fm.fileExists(atPath: profileFile.path) {
+                try patch(profileFile, permissions: 0o600) { profile in
+                    gatewayKeys.forEach { profile.removeValue(forKey: $0) }
+                }
+            }
+            if fm.fileExists(atPath: codeSettings.path) {
+                try patch(codeSettings) { settings in
+                    var env = settings["env"] as? [String: Any] ?? [:]
+                    if let base = env["ANTHROPIC_BASE_URL"] as? String, AppConfig.normalizedBase(base) == proxyBase {
+                        env.removeValue(forKey: "ANTHROPIC_BASE_URL")
+                        env.removeValue(forKey: "ANTHROPIC_AUTH_TOKEN")
+                    }
+                    settings["env"] = env
+                }
+            }
+        }
+    }
+
+    static func runningDesktop() -> NSRunningApplication? {
+        NSRunningApplication.runningApplications(withBundleIdentifier: desktopBundleID).first
+    }
+
+    /// Claude Desktop rewrites its config on exit, so it must be closed before patching.
+    static func quitDesktopAndWait(timeout: TimeInterval = 20) -> Bool {
+        guard let app = runningDesktop() else { return true }
+        app.terminate()
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if runningDesktop() == nil { return true }
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+        return runningDesktop() == nil
+    }
+
+    static func launchDesktop() {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: desktopBundleID) else { return }
+        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+    }
+
+    private static func readJSON(_ url: URL) -> [String: Any] {
+        guard let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return object
+    }
+
+    private static func patch(_ url: URL, permissions: Int? = nil, _ body: (inout [String: Any]) -> Void) throws {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: url.path) {
+            if let data = try? Data(contentsOf: url), !data.isEmpty,
+               (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] == nil {
+                throw error(L.text("\(url.lastPathComponent) is not valid JSON; left untouched.", "\(url.lastPathComponent) geçerli JSON değil; dokunulmadı."))
+            }
+            let backup = url.path + ".grandebar.bak"
+            if !fm.fileExists(atPath: backup) {
+                try? fm.copyItem(atPath: url.path, toPath: backup)
+            }
+        }
+        var object = readJSON(url)
+        body(&object)
+        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        try data.write(to: url, options: .atomic)
+        if let permissions {
+            try fm.setAttributes([.posixPermissions: permissions], ofItemAtPath: url.path)
+        }
+    }
+
+    private static func error(_ message: String) -> NSError {
+        NSError(domain: "GrandeBar", code: 20, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+}
+
+private final class ProviderSwitchCardView: RoundedView {
+    private let onChange: (Bool) -> Void
+    private let segmented = NSSegmentedControl(labels: [L.text("Official", "Resmi"), "CLIProxy"], trackingMode: .selectOne, target: nil, action: nil)
+
+    init(onChange: @escaping (Bool) -> Void) {
+        self.onChange = onChange
+        super.init(color: Theme.cardBackground, radius: 8, borderColor: Theme.cardBorder)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let accent = NSView()
+        accent.wantsLayer = true
+        accent.layer?.backgroundColor = Theme.claudeAccent.withAlphaComponent(0.82).cgColor
+        accent.translatesAutoresizingMaskIntoConstraints = false
+
+        let title = NSTextField(labelWithString: L.text("Claude provider", "Claude sağlayıcı"))
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        title.textColor = Theme.primaryText
+        title.translatesAutoresizingMaskIntoConstraints = false
+
+        let desktop = ClaudeProviderSwitcher.desktopMode()
+        let code = ClaudeProviderSwitcher.codeMode()
+        let state = NSTextField(labelWithString: "Desktop: \(desktop.label) · Code: \(code.label)")
+        state.font = .systemFont(ofSize: 10, weight: .medium)
+        state.textColor = Theme.mutedText
+        state.lineBreakMode = .byTruncatingTail
+        state.translatesAutoresizingMaskIntoConstraints = false
+
+        segmented.target = self
+        segmented.action = #selector(changed)
+        segmented.segmentStyle = .rounded
+        segmented.controlSize = .small
+        segmented.translatesAutoresizingMaskIntoConstraints = false
+        if desktop == .proxy && code == .proxy {
+            segmented.selectedSegment = 1
+        } else if desktop == .official && code == .official {
+            segmented.selectedSegment = 0
+        } else {
+            segmented.selectedSegment = -1
+        }
+
+        [accent, title, state, segmented].forEach(addSubview)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: UI.providerCardHeight),
+            accent.leadingAnchor.constraint(equalTo: leadingAnchor),
+            accent.topAnchor.constraint(equalTo: topAnchor),
+            accent.bottomAnchor.constraint(equalTo: bottomAnchor),
+            accent.widthAnchor.constraint(equalToConstant: 1),
+
+            title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            title.topAnchor.constraint(equalTo: topAnchor, constant: 12),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: segmented.leadingAnchor, constant: -8),
+
+            state.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            state.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            state.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
+
+            segmented.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            segmented.centerYAnchor.constraint(equalTo: title.centerYAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func changed() {
+        onChange(segmented.selectedSegment == 1)
+    }
+}
+
+extension QuotaViewController {
+    fileprivate func switchClaudeProvider(proxy: Bool) {
+        let target = proxy ? "CLIProxy" : L.text("Official account", "Resmi hesap")
+        let desktopRunning = ClaudeProviderSwitcher.runningDesktop() != nil
+
+        let alert = NSAlert()
+        alert.messageText = L.text("Switch Claude to \(target)", "Claude'u \(target) moduna geçir")
+        var info = L.text(
+            "Claude Desktop and Claude Code settings will point to \(target).",
+            "Claude Desktop ve Claude Code ayarları \(target) olarak yazılacak."
+        )
+        if desktopRunning {
+            info += "\n\n" + L.text(
+                "Claude Desktop will quit and reopen. Open chats and Code sessions will be interrupted.",
+                "Claude Desktop kapatılıp yeniden açılacak. Açık sohbetler ve Code oturumları yarıda kalır."
+            )
+        }
+        if proxy {
+            info += "\n\n" + L.text(
+                "In CLIProxy mode Claude Desktop keeps a separate local chat history; claude.ai chats return when you switch back.",
+                "CLIProxy modunda Claude Desktop ayrı, yerel bir sohbet geçmişi tutar; claude.ai sohbetleri Resmi'ye dönünce geri gelir."
+            )
+        }
+        info += "\n\n" + L.text(
+            "Running Claude Code terminal sessions pick up the change after a restart.",
+            "Açık Claude Code terminal oturumları değişikliği yeniden başlatınca alır."
+        )
+        alert.informativeText = info
+        alert.addButton(withTitle: desktopRunning ? L.text("Apply and Restart", "Uygula ve yeniden başlat") : L.text("Apply", "Uygula"))
+        alert.addButton(withTitle: L.text("Cancel", "İptal"))
+        alert.window.appearance = Theme.appAppearance
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            render(cards: latestCards)
+            return
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            var failure: Error?
+            let apiKey = proxy ? ClaudeProviderSwitcher.resolveAPIKey() : nil
+            let quitOK = ClaudeProviderSwitcher.quitDesktopAndWait()
+            if quitOK {
+                do {
+                    try ClaudeProviderSwitcher.apply(proxy: proxy, apiKey: apiKey)
+                } catch {
+                    failure = error
+                }
+                if desktopRunning {
+                    Thread.sleep(forTimeInterval: 1)
+                    ClaudeProviderSwitcher.launchDesktop()
+                }
+            } else {
+                failure = NSError(domain: "GrandeBar", code: 21, userInfo: [NSLocalizedDescriptionKey: L.text(
+                    "Claude Desktop did not quit; nothing was changed.",
+                    "Claude Desktop kapanmadı; hiçbir ayar değişmedi."
+                )])
+            }
+            DispatchQueue.main.async {
+                self.render(cards: self.latestCards)
+                if let failure {
+                    let alert = NSAlert(error: failure)
+                    alert.messageText = L.text("Switch failed", "Geçiş yapılamadı")
+                    alert.runModal()
+                }
+            }
+        }
     }
 }
