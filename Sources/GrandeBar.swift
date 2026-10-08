@@ -232,6 +232,8 @@ private struct QuotaCard {
     /// Claude: replaces the Codex reset-credit lines on the card's top right.
     var headline: String? = nil
     var subline: String? = nil
+    /// Claude: true when the usage API refused (e.g. 429) and the last known values are shown.
+    var stale = false
 
     var isLocked: Bool {
         if allowed == false { return true }
@@ -433,6 +435,10 @@ final class QuotaViewController: NSViewController {
     /// Warm runs for the mode that is not on screen (keeps both modes' 5h windows warm).
     private var backgroundWarmups: [AppMode: SessionWarmupAPI] = [:]
     private var cardsByMode: [AppMode: [QuotaCard]] = [:]
+    /// Last automatic warm per mode; a cold account that stays cold (warm or usage call refused)
+    /// must not re-trigger every second.
+    private var lastAutomaticWarmAt: [AppMode: Date] = [:]
+    private let automaticWarmRetryInterval: TimeInterval = 10 * 60
     /// Bumped on mode switch so in-flight refreshes of the previous mode are dropped.
     private var refreshGeneration = 0
     private var wakeObserver: NSObjectProtocol?
@@ -1064,7 +1070,8 @@ final class QuotaViewController: NSViewController {
         }
         let delay: TimeInterval
         if hasColdAccount {
-            delay = 1
+            let sinceLastWarm = lastAutomaticWarmAt[mode].map { Date().timeIntervalSince($0) } ?? .infinity
+            delay = sinceLastWarm < automaticWarmRetryInterval ? automaticWarmRetryInterval - sinceLastWarm : 1
         } else if let nearestReset = eligible.compactMap(\.sessionResetSeconds).filter({ $0 > 0 }).min() {
             delay = TimeInterval(nearestReset + 120)
         } else {
@@ -1093,12 +1100,14 @@ final class QuotaViewController: NSViewController {
             scheduleAutomaticWarmup(mode: mode, after: 30)
             return
         }
+        lastAutomaticWarmAt[mode] = Date()
         warmSessionsClicked()
     }
 
     /// Warms and re-schedules a mode that is not on screen without touching the visible cards.
     private func backgroundWarmup(mode: AppMode) {
         guard backgroundWarmups[mode] == nil else { return }
+        lastAutomaticWarmAt[mode] = Date()
         let warmup = SessionWarmupAPI(mode: mode)
         backgroundWarmups[mode] = warmup
         warmup.warmEligibleAccounts { [weak self] _ in
@@ -1303,6 +1312,11 @@ final class QuotaViewController: NSViewController {
             parts.append(L.text("\(locked) locked", "\(locked) kilitli"))
         }
         parts.append(L.text("\(open) open", "\(open) açık"))
+
+        let stale = cards.filter(\.stale).count
+        if stale > 0 {
+            parts.append(L.text("\(stale) cached (rate limit)", "\(stale) önbellek (rate limit)"))
+        }
 
         if warming {
             // During in-flight warm: hide cold (same as warmed window).
@@ -2684,17 +2698,30 @@ private final class QuotaAPI {
         }
     }
 
+    /// The usage endpoint rate-limits aggressively, so plans are fetched once and the last good
+    /// card per account is kept to bridge refused refreshes.
+    private static let claudeCacheLock = NSLock()
+    private static var claudePlans: [String: String] = [:]
+    private static var claudeLastCards: [String: QuotaCard] = [:]
+
     private func fetchClaudeUsage(authIndex: String, file: [String: Any], managementKey: String, completion: @escaping (Result<QuotaCard, Error>) -> Void) {
         let name = (file["email"] as? String) ?? (file["account"] as? String) ?? (file["name"] as? String) ?? authIndex
         claudeCall(authIndex: authIndex, url: ClaudeAPI.usageURL, managementKey: managementKey) { usageResult in
             switch usageResult {
             case .failure(let error):
-                completion(.failure(error))
+                Self.claudeCacheLock.lock()
+                let cached = Self.claudeLastCards[authIndex]
+                Self.claudeCacheLock.unlock()
+                if var cached {
+                    cached.stale = true
+                    completion(.success(cached))
+                } else {
+                    completion(.failure(ClaudeAPI.friendlyError(error)))
+                }
             case .success(let usage):
-                self.claudeCall(authIndex: authIndex, url: ClaudeAPI.profileURL, managementKey: managementKey) { profileResult in
+                self.claudePlan(authIndex: authIndex, managementKey: managementKey) { plan in
                     let quota = ClaudeQuota.parse(usage)
-                    let plan = ClaudeAPI.planLabel((try? profileResult.get()) ?? [:])
-                    completion(.success(QuotaCard(
+                    let card = QuotaCard(
                         name: name,
                         plan: plan,
                         sessionPercent: quota.sessionRemaining,
@@ -2709,9 +2736,34 @@ private final class QuotaAPI {
                         weeklyLabel: quota.weeklyLabel,
                         headline: plan,
                         subline: quota.weeklyResetDate.map(ClaudeAPI.formatDate) ?? "--"
-                    )))
+                    )
+                    Self.claudeCacheLock.lock()
+                    Self.claudeLastCards[authIndex] = card
+                    Self.claudeCacheLock.unlock()
+                    completion(.success(card))
                 }
             }
+        }
+    }
+
+    private func claudePlan(authIndex: String, managementKey: String, completion: @escaping (String) -> Void) {
+        Self.claudeCacheLock.lock()
+        let cached = Self.claudePlans[authIndex]
+        Self.claudeCacheLock.unlock()
+        if let cached {
+            completion(cached)
+            return
+        }
+        claudeCall(authIndex: authIndex, url: ClaudeAPI.profileURL, managementKey: managementKey) { result in
+            guard case .success(let profile) = result else {
+                completion("Claude")
+                return
+            }
+            let plan = ClaudeAPI.planLabel(profile)
+            Self.claudeCacheLock.lock()
+            Self.claudePlans[authIndex] = plan
+            Self.claudeCacheLock.unlock()
+            completion(plan)
         }
     }
 
@@ -2929,6 +2981,17 @@ private enum ClaudeAPI {
         else if (account["has_claude_pro"] as? Bool) == true { label = "Pro" }
         if tier.contains("max_20x") { label += " 20x" } else if tier.contains("max_5x") { label += " 5x" }
         return label
+    }
+
+    /// Turns the raw 429 JSON body into a short message for the error card.
+    static func friendlyError(_ error: Error) -> Error {
+        let nsError = error as NSError
+        let message = nsError.localizedDescription.lowercased()
+        guard nsError.code == 429 || message.contains("rate_limit") else { return error }
+        return NSError(domain: "GrandeBar", code: 429, userInfo: [NSLocalizedDescriptionKey: L.text(
+            "Anthropic rate-limited the usage API. GrandeBar keeps the last values once loaded; try again in a few minutes.",
+            "Anthropic kota API'si hız sınırına takıldı. Bir kez yüklendikten sonra GrandeBar son değerleri gösterir; birkaç dakika sonra tekrar dene."
+        )])
     }
 
     static func formatDate(_ date: Date) -> String {
