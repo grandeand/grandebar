@@ -16,6 +16,8 @@ private enum AppMode: String, CaseIterable {
 
 private enum AppConfig {
     static let modeKey = "appMode"
+    static let startModeKey = "startMode"
+    static let startModeOptions = ["last", "codex", "claude"]
     static let defaultAPIBase = "http://localhost:8317"
     static let claudeDefaultAPIBase = "http://127.0.0.1:8317"
     static let claudeAPIBaseKey = "claudeApiBase"
@@ -34,6 +36,15 @@ private enum AppConfig {
 
     static func mode() -> AppMode {
         AppMode(rawValue: UserDefaults.standard.string(forKey: modeKey) ?? "") ?? .codex
+    }
+
+    /// Tab shown whenever the popover opens; `nil` keeps the last used tab.
+    static func startMode() -> AppMode? {
+        AppMode(rawValue: UserDefaults.standard.string(forKey: startModeKey) ?? "last")
+    }
+
+    static func startModeTitle(for option: String) -> String {
+        AppMode(rawValue: option)?.title ?? L.text("Last used", "Son kullanılan")
     }
 
     static func setMode(_ mode: AppMode) {
@@ -317,6 +328,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if popover.isShown {
             closePopover()
         } else {
+            if let start = AppConfig.startMode() {
+                quotaViewController.switchMode(to: start)
+            }
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             startEventMonitors()
         }
@@ -757,7 +771,11 @@ final class QuotaViewController: NSViewController {
     @objc private func modeChanged() {
         let index = modeControl.selectedSegment
         guard AppMode.allCases.indices.contains(index) else { return }
-        let mode = AppMode.allCases[index]
+        switchMode(to: AppMode.allCases[index])
+    }
+
+    fileprivate func switchMode(to mode: AppMode) {
+        loadViewIfNeeded()
         guard mode != AppConfig.mode(), !isWarming else { return }
 
         AppConfig.setMode(mode)
@@ -863,6 +881,12 @@ final class QuotaViewController: NSViewController {
         let autoRefreshPopup = NSPopUpButton(frame: .zero, pullsDown: false)
         let appearancePopup = NSPopUpButton(frame: .zero, pullsDown: false)
         let languagePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        let startModePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+        for option in AppConfig.startModeOptions {
+            startModePopup.addItem(withTitle: AppConfig.startModeTitle(for: option))
+            startModePopup.lastItem?.representedObject = option
+        }
+        startModePopup.selectItem(withTitle: AppConfig.startModeTitle(for: AppConfig.startMode()?.rawValue ?? "last"))
         let automaticWarmup = NSButton(
             checkboxWithTitle: L.text("Automatic session warmup (Codex)", "Otomatik oturum warmup (Codex)"),
             target: nil,
@@ -901,7 +925,7 @@ final class QuotaViewController: NSViewController {
         }
         languagePopup.selectItem(withTitle: AppConfig.languageTitle(for: AppConfig.languageMode()))
 
-        let settingsView = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 390))
+        let settingsView = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 418))
         settingsView.appearance = Theme.appAppearance
         let baseLabel = NSTextField(labelWithString: "Codex Base URL")
         let keyLabel = NSTextField(labelWithString: L.text("Codex management key", "Codex management key"))
@@ -910,26 +934,29 @@ final class QuotaViewController: NSViewController {
         let autoRefreshLabel = NSTextField(labelWithString: L.text("Auto refresh", "Otomatik yenile"))
         let appearanceLabel = NSTextField(labelWithString: L.text("Appearance", "Görünüm"))
         let languageLabel = NSTextField(labelWithString: L.text("Language", "Dil"))
-        baseLabel.frame = NSRect(x: 0, y: 366, width: 340, height: 18)
-        baseField.frame = NSRect(x: 0, y: 338, width: 340, height: 24)
-        keyLabel.frame = NSRect(x: 0, y: 312, width: 340, height: 18)
-        keyField.frame = NSRect(x: 0, y: 284, width: 340, height: 24)
-        claudeBaseLabel.frame = NSRect(x: 0, y: 256, width: 340, height: 18)
-        claudeBaseField.frame = NSRect(x: 0, y: 228, width: 340, height: 24)
-        claudeKeyLabel.frame = NSRect(x: 0, y: 202, width: 340, height: 18)
-        claudeKeyField.frame = NSRect(x: 0, y: 174, width: 340, height: 24)
-        autoRefreshLabel.frame = NSRect(x: 0, y: 140, width: 150, height: 22)
-        autoRefreshPopup.frame = NSRect(x: 156, y: 138, width: 184, height: 26)
-        appearanceLabel.frame = NSRect(x: 0, y: 112, width: 150, height: 22)
-        appearancePopup.frame = NSRect(x: 156, y: 110, width: 184, height: 26)
-        languageLabel.frame = NSRect(x: 0, y: 84, width: 150, height: 22)
-        languagePopup.frame = NSRect(x: 156, y: 82, width: 184, height: 26)
+        baseLabel.frame = NSRect(x: 0, y: 394, width: 340, height: 18)
+        baseField.frame = NSRect(x: 0, y: 366, width: 340, height: 24)
+        keyLabel.frame = NSRect(x: 0, y: 340, width: 340, height: 18)
+        keyField.frame = NSRect(x: 0, y: 312, width: 340, height: 24)
+        claudeBaseLabel.frame = NSRect(x: 0, y: 284, width: 340, height: 18)
+        claudeBaseField.frame = NSRect(x: 0, y: 256, width: 340, height: 24)
+        claudeKeyLabel.frame = NSRect(x: 0, y: 230, width: 340, height: 18)
+        claudeKeyField.frame = NSRect(x: 0, y: 202, width: 340, height: 24)
+        autoRefreshLabel.frame = NSRect(x: 0, y: 168, width: 150, height: 22)
+        autoRefreshPopup.frame = NSRect(x: 156, y: 166, width: 184, height: 26)
+        appearanceLabel.frame = NSRect(x: 0, y: 140, width: 150, height: 22)
+        appearancePopup.frame = NSRect(x: 156, y: 138, width: 184, height: 26)
+        languageLabel.frame = NSRect(x: 0, y: 112, width: 150, height: 22)
+        languagePopup.frame = NSRect(x: 156, y: 110, width: 184, height: 26)
+        let startModeLabel = NSTextField(labelWithString: L.text("Open on tab", "Açılış sekmesi"))
+        startModeLabel.frame = NSRect(x: 0, y: 84, width: 150, height: 22)
+        startModePopup.frame = NSRect(x: 156, y: 82, width: 184, height: 26)
         automaticWarmup.frame = NSRect(x: 0, y: 52, width: 340, height: 22)
         claudeAutomaticWarmup.frame = NSRect(x: 0, y: 26, width: 340, height: 22)
         launchAtLogin.frame = NSRect(x: 0, y: 0, width: 340, height: 22)
         [baseLabel, baseField, keyLabel, keyField, claudeBaseLabel, claudeBaseField, claudeKeyLabel, claudeKeyField,
          autoRefreshLabel, autoRefreshPopup, appearanceLabel, appearancePopup, languageLabel, languagePopup,
-         automaticWarmup, claudeAutomaticWarmup, launchAtLogin].forEach(settingsView.addSubview)
+         startModeLabel, startModePopup, automaticWarmup, claudeAutomaticWarmup, launchAtLogin].forEach(settingsView.addSubview)
 
         let alert = NSAlert()
         alert.messageText = isInitialSetup ? L.text("GrandeBar Setup", "GrandeBar Kurulum") : L.text("GrandeBar Settings", "GrandeBar Ayarlar")
@@ -952,6 +979,7 @@ final class QuotaViewController: NSViewController {
             UserDefaults.standard.set(autoRefreshPopup.selectedItem?.representedObject as? Int ?? 0, forKey: AppConfig.autoRefreshMinutesKey)
             UserDefaults.standard.set(appearancePopup.selectedItem?.representedObject as? String ?? "auto", forKey: AppConfig.appearanceKey)
             UserDefaults.standard.set(languagePopup.selectedItem?.representedObject as? String ?? "auto", forKey: AppConfig.languageKey)
+            UserDefaults.standard.set(startModePopup.selectedItem?.representedObject as? String ?? "last", forKey: AppConfig.startModeKey)
             UserDefaults.standard.set(automaticWarmup.state == .on, forKey: AppConfig.automaticWarmupKey)
             UserDefaults.standard.set(claudeAutomaticWarmup.state == .on, forKey: AppConfig.claudeAutomaticWarmupKey)
             UserDefaults.standard.synchronize()
@@ -1071,9 +1099,13 @@ final class QuotaViewController: NSViewController {
         let delay: TimeInterval
         if hasColdAccount {
             let sinceLastWarm = lastAutomaticWarmAt[mode].map { Date().timeIntervalSince($0) } ?? .infinity
-            delay = sinceLastWarm < automaticWarmRetryInterval ? automaticWarmRetryInterval - sinceLastWarm : 1
+            delay = sinceLastWarm < automaticWarmRetryInterval
+                ? automaticWarmRetryInterval - sinceLastWarm
+                : TimeInterval.random(in: 20...90)
         } else if let nearestReset = eligible.compactMap(\.sessionResetSeconds).filter({ $0 > 0 }).min() {
-            delay = TimeInterval(nearestReset + 120)
+            // Jitter: warm 1-10 min after the window resets, so consecutive warms land 301-310 min apart
+            // instead of on a fixed 5h beat.
+            delay = TimeInterval(nearestReset) + TimeInterval.random(in: 60...600)
         } else {
             delay = 15 * 60
         }
