@@ -94,6 +94,8 @@ open dist/GrandeBar.app
 
 On first launch, GrandeBar asks for the Management Center URL and management key. You can change them later from Settings.
 
+No CLIProxyAPI? Choose `Continue without CLIProxy`. GrandeBar then opens in Claude mode without the account pool. Claude Desktop's own quota, Desktop account switching, shared Code sessions and the local cost line still work. Proxy-only controls (warmup, the CLIProxy route chips) stay hidden or disabled until a management key is added in Settings.
+
 Right-click the menu bar icon, open `Settings`, then set:
 
 - `Base URL`: your CLIProxyAPI Management Center origin, for example `http://localhost:8317`.

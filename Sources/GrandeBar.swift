@@ -88,6 +88,13 @@ private enum AppConfig {
         hasManagementKey(for: mode())
     }
 
+    static let proxySetupSkippedKey = "proxySetupSkipped"
+    /// Chosen on first launch by people without CLIProxyAPI; setup is not forced on them again.
+    static var proxySetupSkipped: Bool {
+        get { UserDefaults.standard.bool(forKey: proxySetupSkippedKey) }
+        set { UserDefaults.standard.set(newValue, forKey: proxySetupSkippedKey) }
+    }
+
     static func hasManagementKey(for mode: AppMode) -> Bool {
         !managementKey(for: mode).isEmpty
     }
@@ -660,6 +667,12 @@ final class QuotaViewController: NSViewController {
         if showSettingsIfNeeded(refreshAfterSave: true) {
             return
         }
+        guard AppConfig.hasManagementKey() else {
+            renderWithoutProxy()
+            refreshLocalUsage()
+            refreshDesktopUsage()
+            return
+        }
         isRefreshing = true
         lastRefreshLabel.stringValue = L.text("Refreshing...", "Yenileniyor...")
         refreshLocalUsage()
@@ -699,6 +712,7 @@ final class QuotaViewController: NSViewController {
         if showSettingsIfNeeded(refreshAfterSave: false) {
             return
         }
+        guard AppConfig.hasManagementKey() else { return }
 
         isWarming = true
         setHeaderActionsEnabled(false)
@@ -735,7 +749,8 @@ final class QuotaViewController: NSViewController {
     }
 
     private func setHeaderActionsEnabled(_ enabled: Bool) {
-        warmButton.isEnabled = enabled
+        // Warming goes through CLIProxyAPI.
+        warmButton.isEnabled = enabled && AppConfig.hasManagementKey()
         refreshButton.isEnabled = enabled
         // A warm run belongs to the visible mode; switching mid-run would mislabel its result.
         modeTabs.isEnabled = !isWarming
@@ -830,7 +845,7 @@ final class QuotaViewController: NSViewController {
 
     @discardableResult
     func showSettingsIfNeeded(refreshAfterSave: Bool) -> Bool {
-        guard !AppConfig.hasManagementKey() else { return false }
+        guard !AppConfig.hasManagementKey(), !AppConfig.proxySetupSkipped else { return false }
         showSettings(isInitialSetup: true, refreshAfterSave: refreshAfterSave)
         return true
     }
@@ -939,15 +954,26 @@ final class QuotaViewController: NSViewController {
         let alert = NSAlert()
         alert.messageText = isInitialSetup ? L.text("GrandeBar Setup", "GrandeBar Kurulum") : L.text("GrandeBar Settings", "GrandeBar Ayarlar")
         alert.informativeText = isInitialSetup
-            ? L.text("Enter the CLIProxyAPI Management Center URL and management key.", "CLIProxyAPI Management Center URL ve management key gir.")
+            ? L.text(
+                "Enter the CLIProxyAPI Management Center URL and management key. No CLIProxy? Continue without it: GrandeBar still shows Claude Desktop's own quota, switches Desktop accounts and shows local cost. You can add CLIProxy later in Settings.",
+                "CLIProxyAPI Management Center URL ve management key gir. CLIProxy kullanmıyor musun? Onsuz devam et: GrandeBar yine Claude Desktop'ın kendi kotasını gösterir, Desktop hesaplarını değiştirir ve yerel maliyeti gösterir. CLIProxy'yi sonra Ayarlar'dan ekleyebilirsin."
+            )
             : L.text("Panel URLs and management keys are stored here.", "Panel adresleri ve management key'ler burada saklanır.")
         alert.accessoryView = settingsView
         alert.addButton(withTitle: L.text("Save", "Kaydet"))
         alert.addButton(withTitle: L.text("Cancel", "İptal"))
+        if isInitialSetup {
+            alert.addButton(withTitle: L.text("Continue without CLIProxy", "CLIProxy olmadan devam et"))
+        }
         alert.window.appearance = Theme.appAppearance
 
         NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn {
+        let response = alert.runModal()
+        let skippedProxy = response == .alertThirdButtonReturn
+        if skippedProxy {
+            AppConfig.proxySetupSkipped = true
+        }
+        if response == .alertFirstButtonReturn || skippedProxy {
             let managementKey = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let claudeManagementKey = claudeKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             UserDefaults.standard.set(AppConfig.normalizedBase(baseField.stringValue), forKey: AppConfig.apiBaseKey)
@@ -976,7 +1002,10 @@ final class QuotaViewController: NSViewController {
                 }
             }
             setLaunchAtLogin(launchAtLogin.state == .on)
-            if refreshAfterSave && AppConfig.hasManagementKey() {
+            if skippedProxy && AppConfig.mode() != .claude {
+                // Claude mode is where GrandeBar works without CLIProxy; switching refreshes.
+                switchMode(to: .claude)
+            } else if refreshAfterSave && (AppConfig.hasManagementKey() || skippedProxy) {
                 refreshQuota()
             }
         }
@@ -1200,6 +1229,61 @@ final class QuotaViewController: NSViewController {
         return L.text("\(label) pool", "\(label) havuzu")
     }
 
+    /// No management key: what works without CLIProxyAPI, plus a note instead of an error.
+    private func renderWithoutProxy() {
+        clearCards()
+        let mode = AppConfig.mode()
+        latestCards = []
+        cardsByMode[mode] = []
+        setSubtitle(L.text("Without CLIProxy", "CLIProxy olmadan"))
+        setDetailLine(nil)
+        setHeaderActionsEnabled(true)
+
+        if mode == .claude {
+            let providerView = makeProviderCard()
+            stackView.addArrangedSubview(providerView)
+            providerView.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
+            let cards = displayCards([])
+            if !cards.isEmpty {
+                let accounts = AccountsGroupView(cards: cards, activeName: activeClaudeCard(in: [])?.card.name)
+                stackView.addArrangedSubview(accounts)
+                accounts.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
+            }
+        }
+
+        let note = mode == .claude
+            ? L.text("The account pool needs CLIProxyAPI. Claude Desktop's own account shows here once it is read. Add CLIProxy in Settings any time.",
+                     "Hesap havuzu için CLIProxyAPI gerekir. Claude Desktop'ın kendi hesabı okununca burada görünür. CLIProxy'yi istediğin zaman Ayarlar'dan ekleyebilirsin.")
+            : L.text("Codex quota needs CLIProxyAPI; add its URL and management key in Settings. The cost line below works without it.",
+                     "Codex kotası için CLIProxyAPI gerekir; adresini ve management key'ini Ayarlar'dan ekle. Alttaki maliyet satırı onsuz da çalışır.")
+        let box = RoundedView(color: Theme.cardBackground, radius: 10)
+        box.translatesAutoresizingMaskIntoConstraints = false
+        let icon = NSImageView(image: NSImage(systemSymbolName: "info.circle", accessibilityDescription: nil) ?? NSImage())
+        icon.contentTintColor = Theme.secondaryText
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        let label = NSTextField(wrappingLabelWithString: note)
+        label.font = .systemFont(ofSize: 11.5, weight: .regular)
+        label.textColor = Theme.secondaryText
+        label.preferredMaxLayoutWidth = UI.cardWidth - 62
+        label.translatesAutoresizingMaskIntoConstraints = false
+        box.addSubview(icon)
+        box.addSubview(label)
+        stackView.addArrangedSubview(box)
+        NSLayoutConstraint.activate([
+            box.widthAnchor.constraint(equalToConstant: currentCardWidth()),
+            icon.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 12),
+            icon.topAnchor.constraint(equalTo: box.topAnchor, constant: 12),
+            icon.widthAnchor.constraint(equalToConstant: 16),
+            icon.heightAnchor.constraint(equalToConstant: 16),
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 10),
+            label.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -12),
+            label.topAnchor.constraint(equalTo: box.topAnchor, constant: 12),
+            label.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -12)
+        ])
+        updateStatusItem(cards: [], summary: totalLimitSummary(for: []))
+        resizeDocument()
+    }
+
     private func renderError(_ message: String) {
         clearCards()
         setSubtitle(L.text("Could not load quota", "Kota yüklenemedi"))
@@ -1398,7 +1482,8 @@ final class QuotaViewController: NSViewController {
             let header = L.text("Active: \(active.card.name) (\(active.client), claude.ai)", "Aktif: \(active.card.name) (\(active.client), claude.ai)")
             statusUpdate(title, ([header] + lines).joined(separator: "\n"))
         } else {
-            let header = AppConfig.mode() == .claude ? [L.text("Pool total (CLIProxy)", "Havuz toplamı (CLIProxy)")] : []
+            let header = AppConfig.mode() == .claude && AppConfig.hasManagementKey(for: .claude)
+                ? [L.text("Pool total (CLIProxy)", "Havuz toplamı (CLIProxy)")] : []
             statusUpdate(menuBarPoolTitle(summary), (header + lines).joined(separator: "\n"))
         }
     }
@@ -3952,11 +4037,13 @@ private final class ProviderSwitchCardView: RoundedView {
         let pending = DesktopLoginState.pendingAlias != nil
         toolTip = "Code: \(code.label) · Desktop: \(desktop == .official ? (alias ?? "claude.ai") : desktop.label)"
 
+        // Without CLIProxy configured the proxy option would only fail, unless it is in use already.
+        let proxyAvailable = AppConfig.hasManagementKey(for: .claude) || code == .proxy || desktop == .proxy
         let codeLabel = RouteChipView(text: "Code", style: .neutral)
         let codeRow = Self.row(
             codeLabel,
             RouteChipView(text: "claude.ai", style: code == .official ? .active : .option) { _ in actions.code(false) },
-            RouteChipView(text: "CLIProxy", style: code == .proxy ? .active : .option) { _ in actions.code(true) }
+            proxyAvailable ? RouteChipView(text: "CLIProxy", style: code == .proxy ? .active : .option) { _ in actions.code(true) } : nil
         )
 
         let desktopLabel = RouteChipView(text: "Desktop", style: .neutral)
@@ -3967,7 +4054,7 @@ private final class ProviderSwitchCardView: RoundedView {
         let desktopRow = Self.row(
             desktopLabel,
             accountChip,
-            RouteChipView(text: "CLIProxy", style: desktop == .proxy ? .active : .option) { _ in actions.desktopRoute(true) }
+            proxyAvailable ? RouteChipView(text: "CLIProxy", style: desktop == .proxy ? .active : .option) { _ in actions.desktopRoute(true) } : nil
         )
 
         let shared = ClaudeSessionSharing.isEnabled
@@ -4001,7 +4088,7 @@ private final class ProviderSwitchCardView: RoundedView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    private static func row(_ target: NSView, _ first: NSView, _ second: NSView) -> NSStackView {
+    private static func row(_ target: NSView, _ first: NSView, _ second: NSView?) -> NSStackView {
         let arrow = NSImageView(image: NSImage(systemSymbolName: "arrow.right", accessibilityDescription: nil) ?? NSImage())
         arrow.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
         arrow.contentTintColor = Theme.mutedText
@@ -4011,7 +4098,7 @@ private final class ProviderSwitchCardView: RoundedView {
         slash.textColor = Theme.mutedText
         slash.translatesAutoresizingMaskIntoConstraints = false
 
-        let row = NSStackView(views: [target, arrow, first, slash, second])
+        let row = NSStackView(views: second.map { [target, arrow, first, slash, $0] } ?? [target, arrow, first])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 6
@@ -4274,15 +4361,25 @@ extension QuotaViewController {
 
     /// After a route or account change: the status item and the active-row mark follow it.
     private func refreshActiveAccount() {
-        guard AppConfig.mode() == .claude, !latestCards.isEmpty else { return }
+        let withoutProxy = !AppConfig.hasManagementKey(for: .claude)
+        guard AppConfig.mode() == .claude, !latestCards.isEmpty || withoutProxy else { return }
         updateStatusItem(cards: latestCards, summary: totalLimitSummary(for: latestCards))
-        guard let index = stackView.arrangedSubviews.firstIndex(where: { $0 is AccountsGroupView }) else { return }
-        let old = stackView.arrangedSubviews[index]
-        stackView.removeArrangedSubview(old)
-        old.removeFromSuperview()
-        let accounts = AccountsGroupView(cards: displayCards(latestCards), activeName: activeClaudeCard(in: latestCards)?.card.name)
-        stackView.insertArrangedSubview(accounts, at: index)
+        let existing = stackView.arrangedSubviews.firstIndex(where: { $0 is AccountsGroupView })
+        // With CLIProxy, a missing list means the error screen is up; leave it.
+        guard existing != nil || withoutProxy else { return }
+        if let existing {
+            let old = stackView.arrangedSubviews[existing]
+            stackView.removeArrangedSubview(old)
+            old.removeFromSuperview()
+        }
+        let cards = displayCards(latestCards)
+        guard !cards.isEmpty else { return }
+        let accounts = AccountsGroupView(cards: cards, activeName: activeClaudeCard(in: latestCards)?.card.name)
+        // Without CLIProxy the list goes right under the provider card.
+        let providerIndex = stackView.arrangedSubviews.firstIndex(where: { $0 is ProviderSwitchCardView }).map { $0 + 1 }
+        stackView.insertArrangedSubview(accounts, at: existing ?? providerIndex ?? 0)
         accounts.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
+        resizeDocument()
     }
 
     private func finishProviderAction(_ failure: Error?) {
