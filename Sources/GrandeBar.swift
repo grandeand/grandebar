@@ -4121,9 +4121,10 @@ private final class ProviderSwitchCardView: RoundedView {
 
         let desktopLabel = RouteChipView(text: "Desktop", style: .neutral)
         let accountText = pending ? L.text("waiting…", "bekleniyor…") : (alias ?? "claude.ai")
-        let accountChip = desktop == .official
-            ? RouteChipView(text: accountText, style: .active, showsMenu: true) { anchor in actions.desktopAccounts(anchor) }
-            : RouteChipView(text: accountText, style: .option) { _ in actions.desktopRoute(false) }
+        // On CLIProxy the menu picks the account to come back to, in one restart.
+        let accountChip = RouteChipView(text: accountText, style: desktop == .official ? .active : .option, showsMenu: true) { anchor in
+            actions.desktopAccounts(anchor)
+        }
         let desktopRow = Self.row(
             desktopLabel,
             accountChip,
@@ -4634,9 +4635,18 @@ extension QuotaViewController {
             store.backfillEmails()
             let accounts = store.accounts()
             let active = store.activeAlias()
+            let onProxy = ClaudeProviderSwitcher.desktopMode() != .official
+            if onProxy {
+                let header = NSMenuItem(title: L.text("Back to claude.ai as:", "claude.ai'ye şu hesapla dön:"), action: nil, keyEquivalent: "")
+                header.isEnabled = false
+                menu.addItem(header)
+                if active == nil {
+                    menu.addItem(menuItem(L.text("Current login", "Mevcut giriş"), #selector(leaveProxyWithCurrentLogin)))
+                }
+            }
             for account in accounts {
                 let item = menuItem(account.alias, #selector(desktopAccountChosen(_:)), represented: account.alias)
-                item.state = account.alias == active ? .on : .off
+                item.state = account.alias == active && !onProxy ? .on : .off
                 var details: [String] = []
                 if let email = account.email, email != account.alias { details.append(email) }
                 let usage = account.accountUUID == desktopCard?.uuid ? currentDesktopCard : nil
@@ -4653,11 +4663,14 @@ extension QuotaViewController {
                 }
                 menu.addItem(item)
             }
-            if !accounts.isEmpty { menu.addItem(.separator()) }
-            if active == nil, store.liveIsSignedIn() {
-                menu.addItem(menuItem(L.text("Save Current Login…", "Mevcut oturumu kaydet…"), #selector(saveCurrentDesktopLogin)))
+            if !accounts.isEmpty || onProxy { menu.addItem(.separator()) }
+            // Signing in needs Desktop on claude.ai.
+            if !onProxy {
+                if active == nil, store.liveIsSignedIn() {
+                    menu.addItem(menuItem(L.text("Save Current Login…", "Mevcut oturumu kaydet…"), #selector(saveCurrentDesktopLogin)))
+                }
+                menu.addItem(menuItem(L.text("Add Account…", "Hesap ekle…"), #selector(addDesktopAccount)))
             }
-            menu.addItem(menuItem(L.text("Add Account…", "Hesap ekle…"), #selector(addDesktopAccount)))
             if !accounts.isEmpty {
                 let rename = NSMenuItem(title: L.text("Rename", "Yeniden adlandır"), action: nil, keyEquivalent: "")
                 let renameMenu = NSMenu()
@@ -4693,22 +4706,37 @@ extension QuotaViewController {
     }
 
     @objc private func desktopAccountChosen(_ sender: NSMenuItem) {
+        let onProxy = ClaudeProviderSwitcher.desktopMode() != .official
         guard let alias = sender.representedObject as? String,
-              alias != ClaudeProviderSwitcher.desktopAccounts.activeAlias() else { return }
-        let info = ClaudeSessionSharing.isEnabled
+              onProxy || alias != ClaudeProviderSwitcher.desktopAccounts.activeAlias() else { return }
+        var info = ClaudeSessionSharing.isEnabled
             ? L.text("Code-tab sessions are shared, so they show up in \(alias) too.", "Code oturumları ortak; \(alias) hesabında da görünür.")
             : L.text("Code-tab sessions are listed per account.", "Code sekmesindeki oturumlar hesaba göre listelenir.")
-        guard confirm(L.text("Switch Claude Desktop to \(alias)", "Claude Desktop'u \(alias) hesabına geçir"), info, button: L.text("Switch", "Geçiş yap"), restartsDesktop: true) else { return }
+        if onProxy {
+            info = L.text("Claude Desktop leaves CLIProxy and comes back on claude.ai as \(alias), in one restart. Claude Code is not changed.",
+                          "Claude Desktop CLIProxy'den çıkar ve tek yeniden başlatmada claude.ai'ye \(alias) olarak döner. Claude Code değişmez.") + "\n\n" + info
+        }
+        let title = onProxy
+            ? L.text("Switch Claude Desktop to claude.ai as \(alias)", "Claude Desktop'u claude.ai'de \(alias) hesabına geçir")
+            : L.text("Switch Claude Desktop to \(alias)", "Claude Desktop'u \(alias) hesabına geçir")
+        guard confirm(title, info, button: L.text("Switch", "Geçiş yap"), restartsDesktop: true) else { return }
 
         DispatchQueue.global(qos: .userInitiated).async {
             var failure: Error?
             do {
-                try ClaudeProviderSwitcher.desktopAccounts.switchTo(alias, whileClosed: ClaudeProviderSwitcher.syncSessionsIfShared)
+                try ClaudeProviderSwitcher.desktopAccounts.switchTo(alias) {
+                    if onProxy { try ClaudeProviderSwitcher.applyDesktop(proxy: false, apiKey: nil) }
+                    ClaudeProviderSwitcher.syncSessionsIfShared()
+                }
             } catch {
                 failure = error
             }
             DispatchQueue.main.async { self.finishProviderAction(failure) }
         }
+    }
+
+    @objc private func leaveProxyWithCurrentLogin() {
+        switchDesktopRoute(proxy: false)
     }
 
     @objc private func saveCurrentDesktopLogin() {
