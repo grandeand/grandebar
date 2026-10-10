@@ -271,6 +271,12 @@ private struct QuotaCard {
         if limitReached == true { return true }
         return false
     }
+
+    /// A used-up general weekly limit blocks the session too. A model-scoped one (Claude's
+    /// "Fable" weekly) does not: other models keep working on the same 5h window.
+    var usableSessionPercent: Int? {
+        weeklyLabel == nil && weeklyPercent == 0 ? 0 : sessionPercent
+    }
 }
 
 private struct LocalUsage {
@@ -1451,8 +1457,8 @@ final class QuotaViewController: NSViewController {
 
     private func totalLimitSummary(for cards: [QuotaCard]) -> TotalLimitSummary {
         let sessions = cards.compactMap { card -> Int? in
-            guard let session = card.sessionPercent else { return nil }
-            return card.weeklyPercent == 0 ? 0 : session
+            guard card.sessionPercent != nil else { return nil }
+            return card.usableSessionPercent
         }
         let weeklies = cards.compactMap(\.weeklyPercent)
         return TotalLimitSummary(
@@ -1477,7 +1483,7 @@ final class QuotaViewController: NSViewController {
     private func updateStatusItem(cards: [QuotaCard], summary: TotalLimitSummary) {
         let lines = displayCards(cards).map { "\($0.name): \($0.sessionPercent.map(String.init) ?? "--")% session, \($0.weeklyPercent.map(String.init) ?? "--")% weekly" }
         if AppConfig.mode() == .claude, let active = activeClaudeCard(in: cards) {
-            let session = active.card.weeklyPercent == 0 ? 0 : active.card.sessionPercent
+            let session = active.card.usableSessionPercent
             let title = "\(paddedMenuBarPercent(session.map { "\($0)%" } ?? "--%"))\n\(paddedMenuBarPercent(active.card.weeklyPercent.map { "\($0)%" } ?? "--%"))"
             let header = L.text("Active: \(active.card.name) (\(active.client), claude.ai)", "Aktif: \(active.card.name) (\(active.client), claude.ai)")
             statusUpdate(title, ([header] + lines).joined(separator: "\n"))
@@ -3351,6 +3357,71 @@ private enum ClaudeAPI {
     }
 }
 
+/// Last quota read for each Claude Desktop account, kept across launches and account switches so
+/// the accounts Desktop is not signed into still show their last known state.
+private enum DesktopUsageCache {
+    private static let key = "claudeDesktopUsageCache"
+
+    private struct Entry: Codable {
+        var name: String
+        var plan: String
+        var headline: String?
+        var subline: String?
+        var weeklyLabel: String?
+        var sessionPercent: Int?
+        var sessionResetAt: Date?
+        var weeklyPercent: Int?
+        var weeklyResetAt: Date?
+        var fetchedAt: Date
+    }
+
+    static func save(_ card: QuotaCard, accountUUID: String) {
+        var entries = load()
+        entries[accountUUID] = Entry(
+            name: card.name, plan: card.plan, headline: card.headline, subline: card.subline,
+            weeklyLabel: card.weeklyLabel,
+            sessionPercent: card.sessionPercent,
+            sessionResetAt: card.sessionResetSeconds.map { card.updatedAt.addingTimeInterval(TimeInterval($0)) },
+            weeklyPercent: card.weeklyPercent,
+            weeklyResetAt: card.weeklyResetSeconds.map { card.updatedAt.addingTimeInterval(TimeInterval($0)) },
+            fetchedAt: card.updatedAt
+        )
+        if let data = try? JSONEncoder().encode(entries) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+    }
+
+    /// The last read, moved to `now`: a window whose reset time has passed shows as full again.
+    static func card(for accountUUID: String, now: Date = Date(), note: ((Date, Bool) -> String)? = nil) -> QuotaCard? {
+        guard let entry = load()[accountUUID] else { return nil }
+        func project(_ percent: Int?, _ resetAt: Date?) -> (percent: Int?, seconds: Int?, reset: Bool) {
+            guard let resetAt else { return (percent, nil, false) }
+            if resetAt <= now { return (percent == nil ? nil : 100, nil, true) }
+            return (percent, Int(resetAt.timeIntervalSince(now)), false)
+        }
+        let session = project(entry.sessionPercent, entry.sessionResetAt)
+        let weekly = project(entry.weeklyPercent, entry.weeklyResetAt)
+        return QuotaCard(
+            name: entry.name, plan: entry.plan,
+            sessionPercent: session.percent, sessionResetSeconds: session.seconds,
+            weeklyPercent: weekly.percent, weeklyResetSeconds: weekly.seconds,
+            resetCreditsAvailableCount: nil, resetCreditExpiries: [],
+            allowed: nil, limitReached: nil, updatedAt: now,
+            weeklyLabel: entry.weeklyLabel,
+            headline: entry.headline,
+            subline: entry.subline,
+            stale: true,
+            note: note?(entry.fetchedAt, session.reset || weekly.reset)
+        )
+    }
+
+    private static func load() -> [String: Entry] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let entries = try? JSONDecoder().decode([String: Entry].self, from: data) else { return [:] }
+        return entries
+    }
+}
+
 /// Quota of the account Claude Desktop is signed into, asked with Desktop's own token, so an
 /// account that is not in CLIProxy still shows up (the way Desktop's own usage screen does).
 private enum DesktopUsage {
@@ -3416,10 +3487,11 @@ private enum DesktopUsage {
             lock.lock()
             lastCards[accountUUID] = card
             lock.unlock()
+            DesktopUsageCache.save(card, accountUUID: accountUUID)
             return card
         case .failure(let error):
             lock.lock()
-            let cached = lastCards[accountUUID]
+            let cached = lastCards[accountUUID] ?? DesktopUsageCache.card(for: accountUUID)
             lock.unlock()
             if var cached {
                 cached.stale = true
@@ -3556,7 +3628,8 @@ private struct ClaudeQuota {
         quota.weeklyResetDate = weekly?.resets
         quota.weeklyResetSeconds = weekly?.resets.map { max(0, Int($0.timeIntervalSinceNow)) }
         let locked = ((usage["five_hour"] as? [String: Any])?["locked_reason"] as? String).map { !$0.isEmpty } ?? false
-        quota.limitReached = locked || quota.sessionRemaining == 0 || quota.weeklyRemaining == 0
+        // A model-scoped weekly (Fable) running out does not stop the account.
+        quota.limitReached = locked || quota.sessionRemaining == 0 || (quota.weeklyLabel == nil && quota.weeklyRemaining == 0)
         return quota
     }
 
@@ -4318,11 +4391,29 @@ extension QuotaViewController {
         return desktopCard.card
     }
 
-    /// CLIProxy accounts sorted, with Desktop's own account on top when CLIProxy lacks it.
+    /// CLIProxy accounts sorted, after Desktop's own account (live) and the other saved Desktop
+    /// accounts (last known values) that CLIProxy lacks.
     private func displayCards(_ cards: [QuotaCard]) -> [QuotaCard] {
         let sorted = cards.sorted(by: sortCards)
-        guard AppConfig.mode() == .claude, let desktop = currentDesktopCard else { return sorted }
-        return [desktop] + sorted
+        guard AppConfig.mode() == .claude else { return sorted }
+        let live = currentDesktopCard
+        let liveUUID = live == nil ? nil : desktopCard?.uuid
+        let cached = ClaudeProviderSwitcher.desktopAccounts.accounts()
+            .filter { $0.accountUUID != liveUUID }
+            .compactMap { account in cachedDesktopCard(for: account) }
+            .filter { !reportsQuota(cards, for: $0.name) && $0.name.lowercased() != live?.name.lowercased() }
+        return [live].compactMap { $0 } + cached + sorted
+    }
+
+    private func cachedDesktopCard(for account: DesktopAccount) -> QuotaCard? {
+        DesktopUsageCache.card(for: account.accountUUID) { fetchedAt, resetSince in
+            let formatter = RelativeDateTimeFormatter()
+            formatter.locale = Locale(identifier: L.isTurkish ? "tr_TR" : "en_US")
+            formatter.unitsStyle = .short
+            let ago = formatter.localizedString(for: fetchedAt, relativeTo: Date())
+            let base = L.text("\(account.alias) · last read \(ago)", "\(account.alias) · son okuma \(ago)")
+            return resetSince ? base + L.text(" · reset since", " · sonra sıfırlandı") : base
+        }
     }
 
     private func reportsQuota(_ cards: [QuotaCard], for email: String) -> Bool {
@@ -4546,9 +4637,15 @@ extension QuotaViewController {
             for account in accounts {
                 let item = menuItem(account.alias, #selector(desktopAccountChosen(_:)), represented: account.alias)
                 item.state = account.alias == active ? .on : .off
-                if let email = account.email, email != account.alias {
+                var details: [String] = []
+                if let email = account.email, email != account.alias { details.append(email) }
+                let usage = account.accountUUID == desktopCard?.uuid ? currentDesktopCard : nil
+                if let card = usage ?? DesktopUsageCache.card(for: account.accountUUID) {
+                    details.append("5h \(card.sessionPercent.map { "\($0)%" } ?? "--") · \(card.weeklyLabel ?? L.text("week", "hafta")) \(card.weeklyPercent.map { "\($0)%" } ?? "--")")
+                }
+                if !details.isEmpty {
                     let title = NSMutableAttributedString(string: account.alias, attributes: [.font: NSFont.menuFont(ofSize: 0)])
-                    title.append(NSAttributedString(string: "  " + email, attributes: [
+                    title.append(NSAttributedString(string: "  " + details.joined(separator: " · "), attributes: [
                         .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
                         .foregroundColor: NSColor.secondaryLabelColor
                     ]))
