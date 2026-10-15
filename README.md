@@ -17,7 +17,7 @@ The app sits in your macOS menu bar, shows the combined session pool percentage,
 - Reset credit count and nearest reset expiry.
 - One-click access to the Management Center quota page.
 - Auto refresh: manual, 5, 10, 15, 30, or 60 minutes.
-- Local token cost across **all Codex homes** (`~/.codex` + `codex-grande` / `aof` / `main` isolated profiles, GrandeClaudex Codex workers in `~/.codex-workers/<id>/codex`, `sessions` and `archived_sessions`) at standard pricing. Usage is the growth of each transcript's `total_token_usage`, so re-emitted `token_count` events are not counted twice.
+- Local token cost across **all Codex homes** (`~/.codex` + m365bridge's isolated per-account profiles, GrandeClaudex Codex workers in `~/.codex-workers/<id>/codex`, `sessions` and `archived_sessions`) at standard pricing. Usage is the growth of each transcript's `total_token_usage`, so re-emitted `token_count` events are not counted twice.
 - Copyable English summary with token cost, remaining quota, reset credits, and per-account remaining.
 - **Manual session warm**: the flame button opens cold 5h windows through the configured remote management API.
 - Header status lines: `N account · R reset` plus `locked · open · cold/warmed` detail.

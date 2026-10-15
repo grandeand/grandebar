@@ -12,7 +12,7 @@ Config (priority: CLI flags > env > GrandeBar macOS prefs):
 Examples:
   python3 scripts/session_warmup.py --dry-run
   python3 scripts/session_warmup.py --yes
-  python3 scripts/session_warmup.py --yes --only samet@grandecorpo.com
+  python3 scripts/session_warmup.py --yes --only you@example.com
   python3 scripts/session_warmup.py --yes --force
 """
 

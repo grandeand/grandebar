@@ -2234,7 +2234,7 @@ private enum LocalCodexUsage {
     private static let turnContextMarker = Data("\"turn_context\"".utf8)
 
     /// Reads rollout transcripts from every Codex home (default ~/.codex and the isolated
-    /// codex-grande, codex-aof, … profiles) instead of `ccusage codex`, which sums the
+    /// per-account m365bridge profiles) instead of `ccusage codex`, which sums the
     /// `last_token_usage` of every `token_count` event although Codex re-emits the same event
     /// without new usage, and which ignores `archived_sessions`. Usage is the growth of
     /// `total_token_usage` per transcript, deduplicated across transcripts.
@@ -2430,7 +2430,7 @@ private enum LocalCodexUsage {
 
         add("\(userHome)/.codex")
 
-        // m365bridge multi-account CLI profiles (codex-grande, codex-aof, …)
+        // m365bridge multi-account CLI profiles (one Codex home per account)
         let bridgeRoots = [
             "\(userHome)/m365bridge-next/codex-cli",
             "\(userHome)/m365bridge-accounts/codex-cli"

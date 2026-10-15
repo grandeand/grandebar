@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Aggregate ccusage across default ~/.codex and isolated multi-profile CODEX_HOME dirs
-# (codex-grande, codex-aof, codex-main, …).
+# (one per account).
 set -euo pipefail
 
 # GrandeBar costs must always use normal/standard pricing. Do not inherit a
