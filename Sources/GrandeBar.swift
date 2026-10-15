@@ -4049,9 +4049,10 @@ private enum ClaudeProviderSwitcher {
         return total
     }
 
-    /// Mirrors Code sessions while Desktop is closed, so it opens with the full list.
+    /// Mirrors Code sessions while Desktop is closed, so it opens with the full list. Only called
+    /// once Desktop has exited, so the copies it flushed on quit are not held back as unsettled.
     static func syncSessionsIfShared() {
-        if ClaudeSessionSharing.isEnabled { sessionSharing.sync() }
+        if ClaudeSessionSharing.isEnabled { sessionSharing.sync(desktopClosed: true) }
     }
     private static var appSupport: String { home + "/Library/Application Support" }
     private static var normalConfig: URL { URL(fileURLWithPath: appSupport + "/Claude/claude_desktop_config.json") }

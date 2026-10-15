@@ -58,8 +58,10 @@ final class ClaudeSessionSharing {
     }
 
     /// One pass over every account and org folder. Safe while Desktop runs; serialized.
+    /// `desktopClosed` is only for callers that saw Desktop exit: nothing can be mid-write then,
+    /// so even the files Desktop flushed as it quit are copied.
     @discardableResult
-    func sync() -> Result {
+    func sync(desktopClosed: Bool = false) -> Result {
         lock.lock()
         defer { lock.unlock() }
         var result = Result()
@@ -68,6 +70,7 @@ final class ClaudeSessionSharing {
         guard dirs.count >= 2 else { return result }
         var listing: [URL: [String: Int64]] = [:]
         for dir in dirs { listing[dir] = scan(dir) }
+        let settle = desktopClosed ? 0 : Self.settleNanoseconds
 
         // 1) Tombstones: spread them and drop the deleted sessions everywhere.
         var tombSource: [String: URL] = [:]
@@ -96,7 +99,7 @@ final class ClaudeSessionSharing {
         var best: [String: (mtime: Int64, url: URL)] = [:]
         for dir in dirs {
             for (name, mtime) in listing[dir, default: [:]] {
-                guard let id = Self.sessionID(name), tombSource[id] == nil, now - mtime >= Self.settleNanoseconds else { continue }
+                guard let id = Self.sessionID(name), tombSource[id] == nil, now - mtime >= settle else { continue }
                 if let current = best[name], current.mtime >= mtime { continue }
                 best[name] = (mtime, dir.appendingPathComponent(name))
             }
