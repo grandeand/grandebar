@@ -96,24 +96,29 @@ final class ClaudeSessionSharing {
 
         // 2) Sessions: the newest settled copy wins; JSON is checked only before copying.
         let now = Self.nowNanoseconds()
-        var best: [String: (mtime: Int64, url: URL)] = [:]
-        for dir in dirs {
-            for (name, mtime) in listing[dir, default: [:]] {
-                guard let id = Self.sessionID(name), tombSource[id] == nil, now - mtime >= settle else { continue }
-                if let current = best[name], current.mtime >= mtime { continue }
-                best[name] = (mtime, dir.appendingPathComponent(name))
+        func newest(_ name: String, in candidates: [URL]) -> (mtime: Int64, url: URL)? {
+            var best: (mtime: Int64, url: URL)?
+            for dir in candidates {
+                guard let mtime = listing[dir]?[name], now - mtime >= settle, mtime > (best?.mtime ?? -1) else { continue }
+                best = (mtime, dir.appendingPathComponent(name))
             }
+            return best
         }
-        for (name, source) in best {
-            var targets = dirs.filter { dir in
-                dir.appendingPathComponent(name) != source.url && (listing[dir]?[name] ?? -1) < source.mtime
-            }
-            guard !targets.isEmpty,
-                  let data = try? Data(contentsOf: source.url),
-                  let session = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { continue }
-            // Folderless sessions run in hidden scratch dirs; third-party mode would list each one as a project.
-            if ((session["cwd"] as? String) ?? "").contains("/scratch-workspaces/") {
-                targets = targets.filter { !isThirdParty($0) }
+        func olderCopies(of name: String, than source: (mtime: Int64, url: URL), in candidates: [URL]) -> [URL] {
+            candidates.filter { $0.appendingPathComponent(name) != source.url && (listing[$0]?[name] ?? -1) < source.mtime }
+        }
+        let names = Set(dirs.flatMap { listing[$0, default: [:]].keys }.filter { Self.sessionID($0).map { tombSource[$0] == nil } ?? false })
+        for name in names.sorted() {
+            guard var source = newest(name, in: dirs) else { continue }
+            var targets = olderCopies(of: name, than: source, in: dirs)
+            guard !targets.isEmpty, let session = Self.readSession(source.url) else { continue }
+            // Folderless sessions run in hidden scratch dirs; third-party mode would list each one as a
+            // project. So they are not shared with it either way, and a stale copy there never wins.
+            if Self.isScratch(session) {
+                let shared = dirs.filter { !isThirdParty($0) }
+                guard let own = newest(name, in: shared) else { continue }
+                source = own
+                targets = olderCopies(of: name, than: source, in: shared)
             }
             for dir in targets {
                 let isNew = listing[dir]?[name] == nil
@@ -214,6 +219,17 @@ final class ClaudeSessionSharing {
               rename(tmp.path, destination.path) == 0 else {
             throw CocoaError(.fileWriteUnknown)
         }
+    }
+
+    // MARK: Sessions
+
+    private static func readSession(_ url: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private static func isScratch(_ session: [String: Any]) -> Bool {
+        ((session["cwd"] as? String) ?? "").contains("/scratch-workspaces/")
     }
 
     // MARK: Names

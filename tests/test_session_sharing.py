@@ -119,6 +119,33 @@ class SessionSharingTests(unittest.TestCase):
         self.assertEqual(self.read(self.b, sid)["title"], "Flushed on quit")
         self.assertEqual(self.mtime(self.a, sid), self.mtime(self.b, sid))
 
+    # Claude-3p
+
+    def test_stale_third_party_copy_of_a_scratch_session_never_wins(self):
+        third = self.folder("Claude-3p", "cccccccc-0000-4000-8000-000000000003", "00000000-0000-4000-8000-000000000001")
+        sid = str(uuid.uuid4())
+        scratch = "/Users/someone/Library/Application Support/Claude/scratch-workspaces/x/y/scratch-1"
+        for folder in (self.a, self.b):
+            self.write(folder, sid, age=600, cwd=scratch, isArchived=True)
+        self.sync()
+        before = {folder: self.mtime(folder, sid) for folder in (self.a, self.b)}
+        # Desktop in CLIProxy mode saves its old, un-archived copy: the newest file now.
+        self.write(third, sid, age=30, cwd=scratch, isArchived=False, title="Stale")
+        self.sync()
+        for folder in (self.a, self.b):
+            self.assertTrue(self.read(folder, sid)["isArchived"])
+            self.assertEqual(self.mtime(folder, sid), before[folder])
+        self.assertEqual(self.read(third, sid)["title"], "Stale")
+
+    def test_third_party_still_shares_sessions_in_project_folders(self):
+        third = self.folder("Claude-3p", "cccccccc-0000-4000-8000-000000000003", "00000000-0000-4000-8000-000000000001")
+        sid = str(uuid.uuid4())
+        self.write(self.a, sid, age=600)
+        self.write(third, sid, age=30, title="Newer in CLIProxy")
+        self.sync()
+        self.assertEqual(self.read(self.a, sid)["title"], "Newer in CLIProxy")
+        self.assertEqual(self.read(self.b, sid)["title"], "Newer in CLIProxy")
+
 
 if __name__ == "__main__":
     unittest.main()
