@@ -167,7 +167,7 @@ final class ClaudeSessionSharing {
         //    action, dated by its mtime; the latest one wins. Saving the value the folder already
         //    held, even after an action elsewhere, is a stale save and changes nothing. A copy in a
         //    folder with no record of it (a new account, or a session seen for the first time)
-        //    counts as an action when it disagrees with the latest one and is newer.
+        //    shows the state at its mtime, so it counts too, agreeing or not.
         let names = Set(dirs.flatMap { listing[$0, default: [:]].keys }.filter { Self.sessionID($0).map { tombSource[$0] == nil } ?? false })
         var observed: [String: [(mtime: Int64, archived: Bool)]] = [:]
         for dir in dirs {
@@ -188,14 +188,11 @@ final class ClaudeSessionSharing {
             }
             ledger.copies[folderKey(dir)] = copies
         }
-        // Oldest first, so the newest copy that disagrees decides; folder order breaks ties.
+        // The newest observation decides and moves the action time; folder order breaks ties.
         for (id, changes) in observed {
-            var latest = ledger.archive[id]
-            for change in changes.enumerated().sorted(by: { ($0.element.mtime, $0.offset) < ($1.element.mtime, $1.offset) }).map(\.element) {
-                if let current = latest, change.mtime <= current.at || change.archived == current.archived { continue }
-                latest = Ledger.Archive(archived: change.archived, at: change.mtime)
+            for change in changes where change.mtime > ledger.archive[id]?.at ?? .min {
+                ledger.archive[id] = Ledger.Archive(archived: change.archived, at: change.mtime)
             }
-            ledger.archive[id] = latest
         }
         let ids = Set(names.compactMap(Self.sessionID))
         ledger.archive = ledger.archive.filter { ids.contains($0.key) }

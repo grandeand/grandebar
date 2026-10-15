@@ -24,22 +24,27 @@ func emit(_ result: ClaudeSessionSharing.Result) {
     print(String(data: data, encoding: .utf8)!)
 }
 
-/// Stands in for Claude Desktop: quitting flushes what it still held, i.e. staged *.flush files
-/// land with the current time.
+/// Desktop saving what it holds: staged *.flush files land with the current time.
+func saveStaged(in support: URL) -> Bool {
+    var staged: [URL] = []
+    for case let url as URL in FileManager.default.enumerator(at: support, includingPropertiesForKeys: nil)! where url.pathExtension == "flush" {
+        staged.append(url)
+    }
+    for url in staged {
+        let path = url.deletingPathExtension().path
+        guard rename(url.path, path) == 0, utimes(path, nil) == 0 else { return false }
+    }
+    return true
+}
+
+/// Stands in for Claude Desktop: quitting flushes what it still held.
 final class FakeDesktop: DesktopAppControl {
     let support: URL
     private(set) var isRunning = true
     init(home: String) { support = URL(fileURLWithPath: home).appendingPathComponent("Library/Application Support") }
 
     func quitAndWait(timeout: TimeInterval) -> Bool {
-        var staged: [URL] = []
-        for case let url as URL in FileManager.default.enumerator(at: support, includingPropertiesForKeys: nil)! where url.pathExtension == "flush" {
-            staged.append(url)
-        }
-        for url in staged {
-            let path = url.deletingPathExtension().path
-            guard rename(url.path, path) == 0, utimes(path, nil) == 0 else { return false }
-        }
+        guard saveStaged(in: support) else { return false }
         isRunning = false
         return true
     }
@@ -47,14 +52,25 @@ final class FakeDesktop: DesktopAppControl {
     func launch() { isRunning = true }
 }
 
+final class Checks { var count = 0 }
+
 let arguments = CommandLine.arguments
-// "running": a background pass with Desktop up; "quit": one after Desktop was quit some other
-// way; "closed": the sync GrandeBar runs once it has seen Desktop exit.
-let mode = arguments.count > 3 ? arguments[3] : "running"
-let sharing = ClaudeSessionSharing(home: arguments[2], isDesktopRunning: { mode == "running" })
+// "running": a background pass with Desktop up; "closed": the sync GrandeBar runs once it has
+// seen Desktop exit; "quit[:N[:M]]": a pass after Desktop was quit some other way, where Desktop
+// starts again from the N-th running check on and saves what is staged at the M-th.
+let mode = (arguments.count > 3 ? arguments[3] : "running").split(separator: ":").map(String.init)
+let runningFrom = mode.count > 1 ? Int(mode[1])! : Int.max
+let savesAt = mode.count > 2 ? Int(mode[2])! : 0
+let checks = Checks()
+let support = URL(fileURLWithPath: arguments[2]).appendingPathComponent("Library/Application Support")
+let sharing = ClaudeSessionSharing(home: arguments[2], isDesktopRunning: {
+    checks.count += 1
+    if checks.count == savesAt { _ = saveStaged(in: support) }
+    return mode[0] == "running" || checks.count >= runningFrom
+})
 switch arguments[1] {
 case "sync":
-    emit(sharing.sync(desktopClosed: mode == "closed"))
+    emit(sharing.sync(desktopClosed: mode[0] == "closed"))
 case "switch":
     // GrandeBar's switch: quit Desktop, restore the account, sync while closed, relaunch.
     let desktop = FakeDesktop(home: arguments[2])
@@ -165,8 +181,8 @@ class Sandbox(unittest.TestCase):
     def ledger(self):
         return self.support / "GrandeBar" / "ClaudeSessionArchive.json"
 
-    def sync(self, closed=False, running=True):
-        mode = "closed" if closed else ("running" if running else "quit")
+    def sync(self, closed=False, running=True, mode=None):
+        mode = mode or ("closed" if closed else ("running" if running else "quit"))
         result = subprocess.run([str(BINARY), "sync", str(self.home), mode], check=True, capture_output=True, text=True)
         return json.loads(result.stdout)
 
@@ -373,6 +389,20 @@ class ArchiveTests(Sandbox):
                 for folder in self.folders + [late]:
                     self.assertEqual(self.read(folder, sid)["isArchived"], newer)
                     self.assertEqual(self.read(folder, sid)["title"], "Newer elsewhere")
+
+    def test_a_newer_agreeing_copy_keeps_an_older_opposite_one_from_reverting(self):
+        sid = self.shared()
+        self.write(self.a, sid, age=300, isArchived=True)
+        self.sync()
+        d = self.folder("Claude", "eeeeeeee-0000-4000-8000-00000000000d")
+        self.write(d, sid, age=50, isArchived=True, title="Newer on D")
+        self.sync()
+        e = self.folder("Claude", "eeeeeeee-0000-4000-8000-00000000000e")
+        self.write(e, sid, age=100, isArchived=False)
+        self.sync()
+        for folder in self.folders + [d, e]:
+            self.assertTrue(self.read(folder, sid)["isArchived"])
+            self.assertEqual(self.read(folder, sid)["title"], "Newer on D")
 
     def test_a_returning_folder_with_an_older_copy_does_not_revert(self):
         sid = self.shared()
