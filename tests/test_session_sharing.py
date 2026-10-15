@@ -329,6 +329,31 @@ class ArchiveTests(Sandbox):
             self.assertFalse((folder / f"deleted_{sid}").exists())
             self.assertEqual(self.read(folder, sid)["title"], "Imported")
 
+    def test_a_new_folder_with_a_newer_archive_state_wins(self):
+        for newer in (True, False):
+            with self.subTest(newer=newer):
+                sid = self.shared(isArchived=not newer)
+                # A fourth account (or a folder whose baseline was dropped) shows up holding a
+                # copy written after the last known action.
+                late = self.folder("Claude", f"eeeeeeee-0000-4000-8000-00000000000{int(newer)}")
+                self.write(late, sid, age=10, isArchived=newer, title="Newer elsewhere")
+                self.sync(closed=True)
+                for folder in self.folders + [late]:
+                    self.assertEqual(self.read(folder, sid)["isArchived"], newer)
+                    self.assertEqual(self.read(folder, sid)["title"], "Newer elsewhere")
+
+    def test_a_returning_folder_with_an_older_copy_does_not_revert(self):
+        sid = self.shared()
+        self.write(self.a, sid, age=100, isArchived=True)
+        self.sync()
+        hidden = self.c.with_name(self.c.name + ".away")
+        self.c.rename(hidden)
+        self.sync()
+        hidden.rename(self.c)
+        self.write(self.c, sid, age=200, isArchived=False)
+        self.sync(closed=True)
+        self.assertEqual(self.archived(sid, *self.folders), [True, True, True])
+
     def test_first_run_starts_from_the_newest_copy(self):
         newer, tie = str(uuid.uuid4()), str(uuid.uuid4())
         self.write(self.a, newer, age=100, isArchived=True, title="Newest")

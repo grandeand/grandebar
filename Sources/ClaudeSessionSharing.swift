@@ -155,9 +155,11 @@ final class ClaudeSessionSharing {
 
         // 2) Archive actions. A copy whose isArchived differs from what its own folder held is an
         //    action, dated by its mtime; the latest one wins. Saving the value the folder already
-        //    held, even after an action elsewhere, is a stale save and changes nothing.
+        //    held, even after an action elsewhere, is a stale save and changes nothing. A copy in a
+        //    folder with no record of it (a new account, or a session seen for the first time)
+        //    counts as an action when it disagrees with the latest one and is newer.
         let names = Set(dirs.flatMap { listing[$0, default: [:]].keys }.filter { Self.sessionID($0).map { tombSource[$0] == nil } ?? false })
-        var firstSeen: [String: Ledger.Archive] = [:]
+        var observed: [String: [(mtime: Int64, archived: Bool)]] = [:]
         for dir in dirs {
             let held = ledger.copies[folderKey(dir)] ?? [:]
             var copies: [String: Ledger.Copy] = [:]
@@ -172,18 +174,19 @@ final class ClaudeSessionSharing {
                 copies[id] = Ledger.Copy(mtime: mtime, archived: archived)
                 // Scratch sessions are not shared with Claude-3p (see 3), so its copies take no part.
                 if isThirdParty(dir), Self.isScratch(session) { continue }
-                if let old {
-                    if old.archived != archived, mtime > ledger.archive[id]?.at ?? .min {
-                        ledger.archive[id] = Ledger.Archive(archived: archived, at: mtime)
-                    }
-                } else if ledger.archive[id] == nil, mtime > firstSeen[id]?.at ?? .min {
-                    // A session seen for the first time starts from its newest copy.
-                    firstSeen[id] = Ledger.Archive(archived: archived, at: mtime)
-                }
+                if old?.archived != archived { observed[id, default: []].append((mtime, archived)) }
             }
             ledger.copies[folderKey(dir)] = copies
         }
-        ledger.archive.merge(firstSeen) { current, _ in current }
+        // Oldest first, so the newest copy that disagrees decides; folder order breaks ties.
+        for (id, changes) in observed {
+            var latest = ledger.archive[id]
+            for change in changes.enumerated().sorted(by: { ($0.element.mtime, $0.offset) < ($1.element.mtime, $1.offset) }).map(\.element) {
+                if let current = latest, change.mtime <= current.at || change.archived == current.archived { continue }
+                latest = Ledger.Archive(archived: change.archived, at: change.mtime)
+            }
+            ledger.archive[id] = latest
+        }
         let ids = Set(names.compactMap(Self.sessionID))
         ledger.archive = ledger.archive.filter { ids.contains($0.key) }
         ledger.copies = ledger.copies.filter { folderKeys.contains($0.key) }
