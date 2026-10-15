@@ -80,8 +80,23 @@ enum GrandeClaudexCLI {
         case unreadable
     }
 
-    static var defaultExecutable: String {
-        (NSHomeDirectory() as NSString).appendingPathComponent(".local/bin/gdc")
+    /// Where gdc is looked for and what it runs with: GrandeClaudex installs it in ~/.local/bin, and
+    /// a menu bar app starts with launchd's minimal PATH, so the usual bins come first.
+    static func searchPath(home: String = NSHomeDirectory(), path: String? = ProcessInfo.processInfo.environment["PATH"]) -> [String] {
+        ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"] + (path ?? "/usr/bin:/bin").split(separator: ":").map(String.init)
+    }
+
+    /// gdc's path, ~/.local/bin/gdc first; nil when GrandeClaudex is not installed.
+    static func locate(home: String = NSHomeDirectory(), path: String? = ProcessInfo.processInfo.environment["PATH"]) -> String? {
+        searchPath(home: home, path: path)
+            .filter { $0.hasPrefix("/") }
+            .map { ($0 as NSString).appendingPathComponent("gdc") }
+            .first { candidate in
+                var isDirectory: ObjCBool = false
+                return FileManager.default.fileExists(atPath: candidate, isDirectory: &isDirectory)
+                    && !isDirectory.boolValue
+                    && FileManager.default.isExecutableFile(atPath: candidate)
+            }
     }
 
     /// A cache read still asks `claude auth status` for every worker; a probe also runs Claude
@@ -118,16 +133,17 @@ enum GrandeClaudexCLI {
     /// `gdc usage --json`, or with `probe` `gdc usage --json --probe`, which reads every worker's
     /// limits again first. Blocks until gdc exits or the timeout stops it, so call it off the main
     /// thread.
-    static func fetch(probe: Bool, executable: String = defaultExecutable, timeout: TimeInterval? = nil) -> Result<GrandeClaudexSnapshot, Failure> {
-        guard FileManager.default.isExecutableFile(atPath: executable) else { return .failure(.notInstalled) }
+    static func fetch(probe: Bool, executable: String? = nil, timeout: TimeInterval? = nil) -> Result<GrandeClaudexSnapshot, Failure> {
+        guard let executable = executable ?? locate(), FileManager.default.isExecutableFile(atPath: executable) else {
+            return .failure(.notInstalled)
+        }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = ["usage", "--json"] + (probe ? ["--probe"] : [])
-        // A menu bar app starts with launchd's minimal PATH, and gdc is a script that looks up its interpreter.
+        // gdc is a script that looks up its interpreter.
         var environment = ProcessInfo.processInfo.environment
-        let extra = ["\(NSHomeDirectory())/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"]
-        environment["PATH"] = (extra + (environment["PATH"] ?? "/usr/bin:/bin").split(separator: ":").map(String.init)).joined(separator: ":")
+        environment["PATH"] = searchPath(path: environment["PATH"]).joined(separator: ":")
         process.environment = environment
         let output = Pipe()
         let errors = Pipe()

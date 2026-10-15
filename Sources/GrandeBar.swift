@@ -14,21 +14,6 @@ private enum AppMode: String, CaseIterable {
     }
 }
 
-/// Claude mode's limit list is split by where the accounts come from.
-private enum ClaudeLimitsTab: String, CaseIterable {
-    case desktop
-    case claudex
-    case cliproxy
-
-    var title: String {
-        switch self {
-        case .desktop: return "Desktop"
-        case .claudex: return "Claudex"
-        case .cliproxy: return "CLIProxy"
-        }
-    }
-}
-
 private enum AppConfig {
     static let modeKey = "appMode"
     static let claudeTabKey = "claudeLimitsTab"
@@ -69,8 +54,9 @@ private enum AppConfig {
         UserDefaults.standard.set(mode.rawValue, forKey: modeKey)
     }
 
-    static func claudeTab() -> ClaudeLimitsTab {
-        ClaudeLimitsTab(rawValue: UserDefaults.standard.string(forKey: claudeTabKey) ?? "") ?? .desktop
+    /// A remembered Claudex tab shows Desktop while gdc is not installed.
+    static func claudeTab(claudexInstalled: Bool) -> ClaudeLimitsTab {
+        ClaudeLimitsTab.resolved(UserDefaults.standard.string(forKey: claudeTabKey), claudexInstalled: claudexInstalled)
     }
 
     static func setClaudeTab(_ tab: ClaudeLimitsTab) {
@@ -525,6 +511,9 @@ final class QuotaViewController: NSViewController {
     private var latestUsage: LocalUsage?
     /// What the CLIProxy tab shows when it has no pool to list.
     private var cliproxyProblem: String?
+    /// Whether GrandeClaudex's gdc is installed, checked again whenever the popover opens; without
+    /// it there is no Claudex tab and gdc is never run.
+    private var claudexInstalled = GrandeClaudexCLI.locate() != nil
     /// GrandeClaudex's Claude workers, read through gdc; outside the pool totals and the menu bar.
     private var claudex: GrandeClaudexSnapshot?
     private var claudexProblem: String?
@@ -698,8 +687,20 @@ final class QuotaViewController: NSViewController {
 
     override func viewWillAppear() {
         super.viewWillAppear()
-        // Stored reads show "last read" times and reset countdowns relative to now.
-        rebuildClaudeTabContent()
+        // gdc may have been installed or removed since the popover last opened.
+        let installed = GrandeClaudexCLI.locate() != nil
+        guard installed != claudexInstalled else {
+            // Stored reads show "last read" times and reset countdowns relative to now.
+            rebuildClaudeTabContent()
+            return
+        }
+        claudexInstalled = installed
+        rebuildClaudeTabContent(withTabs: true)
+        if installed { refreshClaudex() }
+    }
+
+    private var claudeTab: ClaudeLimitsTab {
+        AppConfig.claudeTab(claudexInstalled: claudexInstalled)
     }
 
     private func updateSubtitle() {
@@ -2071,11 +2072,13 @@ private final class ModeTabsView: NSView {
     }
 }
 
-/// Desktop / Claudex / CLIProxy pill tabs above the Claude limit list.
+/// Desktop / Claudex / CLIProxy pill tabs above the Claude limit list; Claudex only with gdc.
 private final class LimitTabsView: NSView {
+    private let tabs: [ClaudeLimitsTab]
     private let onSelect: (ClaudeLimitsTab) -> Void
 
-    init(selected: ClaudeLimitsTab, onSelect: @escaping (ClaudeLimitsTab) -> Void) {
+    init(tabs: [ClaudeLimitsTab], selected: ClaudeLimitsTab, onSelect: @escaping (ClaudeLimitsTab) -> Void) {
+        self.tabs = tabs
         self.onSelect = onSelect
         super.init(frame: .zero)
         wantsLayer = true
@@ -2090,7 +2093,7 @@ private final class LimitTabsView: NSView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
-        for tab in ClaudeLimitsTab.allCases {
+        for tab in tabs {
             let isSelected = tab == selected
             let segment = RoundedView(color: isSelected ? Theme.segmentThumb : .clear, radius: 6)
             if isSelected {
@@ -2125,7 +2128,6 @@ private final class LimitTabsView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        let tabs = ClaudeLimitsTab.allCases
         let point = convert(event.locationInWindow, from: nil)
         let index = min(tabs.count - 1, max(0, Int(point.x / max(1, bounds.width) * CGFloat(tabs.count))))
         onSelect(tabs[index])
@@ -4624,7 +4626,7 @@ extension QuotaViewController {
     }
 
     private func addClaudeTabs() {
-        let tabs = LimitTabsView(selected: AppConfig.claudeTab()) { [weak self] tab in
+        let tabs = LimitTabsView(tabs: ClaudeLimitsTab.visible(claudexInstalled: claudexInstalled), selected: claudeTab) { [weak self] tab in
             self?.selectClaudeTab(tab)
         }
         tabs.translatesAutoresizingMaskIntoConstraints = false
@@ -4661,7 +4663,7 @@ extension QuotaViewController {
     }
 
     private func claudeTabContent() -> [NSView] {
-        switch AppConfig.claudeTab() {
+        switch claudeTab {
         case .desktop:
             let cards = desktopCards(latestCards)
             guard !cards.isEmpty else {
@@ -4687,7 +4689,7 @@ extension QuotaViewController {
     }
 
     private func selectClaudeTab(_ tab: ClaudeLimitsTab) {
-        guard tab != AppConfig.claudeTab() else { return }
+        guard tab != claudeTab else { return }
         AppConfig.setClaudeTab(tab)
         rebuildClaudeTabContent(withTabs: true)
         if tab == .claudex {
@@ -4700,7 +4702,7 @@ extension QuotaViewController {
     /// at least `claudexProbeInterval` old and only reads gdc's cache otherwise; the tab's button
     /// probes right away.
     private func refreshClaudex(probeNow: Bool = false) {
-        guard AppConfig.mode() == .claude else { return }
+        guard AppConfig.mode() == .claude, claudexInstalled else { return }
         guard !claudexInFlight else {
             if probeNow, !claudexProbing { claudexProbeQueued = true }
             return
@@ -4735,7 +4737,12 @@ extension QuotaViewController {
             claudex = snapshot
             claudexProblem = nil
         case .failure(.notInstalled):
-            claudexProblem = L.text("gdc was not found at ~/.local/bin/gdc", "gdc, ~/.local/bin/gdc konumunda bulunamadı")
+            // gdc went away since the last check, so the Claudex tab does too.
+            claudexInstalled = false
+            claudex = nil
+            claudexProblem = nil
+            if AppConfig.mode() == .claude { rebuildClaudeTabContent(withTabs: true) }
+            return
         case .failure(.timedOut):
             claudexProblem = L.text("gdc did not answer in time", "gdc zamanında yanıt vermedi")
         case .failure(.unreadable):
@@ -4743,7 +4750,7 @@ extension QuotaViewController {
         case .failure(.failed(let message)):
             claudexProblem = L.text("gdc failed: \(message)", "gdc hata verdi: \(message)")
         }
-        guard AppConfig.mode() == .claude, AppConfig.claudeTab() == .claudex else { return }
+        guard AppConfig.mode() == .claude, claudeTab == .claudex else { return }
         rebuildClaudeTabContent()
     }
 

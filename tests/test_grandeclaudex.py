@@ -10,7 +10,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "Sources" / "GrandeClaudex.swift"
+SOURCES = [ROOT / "Sources" / "GrandeClaudex.swift", ROOT / "Sources" / "ClaudeLimitsTab.swift"]
 
 HARNESS = """
 import Foundation
@@ -65,6 +65,15 @@ case "fetch":
     case .failure(.timedOut): emit(["failure": "timedOut"])
     case .failure(.failed(let message)): emit(["failure": "failed", "message": message])
     }
+case "locate":
+    let found: Any = GrandeClaudexCLI.locate(home: arguments[2], path: arguments[3]) ?? NSNull()
+    emit(["gdc": found])
+case "tabs":
+    let installed = arguments[3] == "installed"
+    emit([
+        "visible": ClaudeLimitsTab.visible(claudexInstalled: installed).map(\\.title),
+        "selected": ClaudeLimitsTab.resolved(arguments[2], claudexInstalled: installed).title
+    ])
 default:
     exit(2)
 }
@@ -75,12 +84,12 @@ NOW = 1_792_100_000
 
 def worker(**overrides):
     row = {
-        "id": "gc-grande1",
-        "alias": "gc-grande1",
+        "id": "gc-worker1",
+        "alias": "gc-worker1",
         "kind": "claude",
-        "email": "grande1@example.com",
+        "email": "worker1@example.com",
         "logged_in": True,
-        "login_email": "grande1@example.com",
+        "login_email": "worker1@example.com",
         "plan": "team",
         "org": "Example",
         "model": None,
@@ -111,7 +120,7 @@ class GrandeClaudexTests(unittest.TestCase):
         (sources / "main.swift").write_text(HARNESS)
         cls.binary = cls.work / "harness-bin"
         subprocess.run(
-            ["swiftc", str(SOURCE), str(sources / "main.swift"), "-o", str(cls.binary)],
+            ["swiftc", *map(str, SOURCES), str(sources / "main.swift"), "-o", str(cls.binary)],
             check=True,
             capture_output=True,
         )
@@ -143,11 +152,11 @@ class GrandeClaudexTests(unittest.TestCase):
 
     def test_only_claude_workers_are_kept_in_order(self):
         parsed = self.parse(payload(
-            worker(id="gc-grande1"),
+            worker(id="gc-worker1"),
             worker(id="cx-1", alias="cx-1", kind="codex"),
-            worker(id="kr-samet", alias="kr-samet"),
+            worker(id="gc-worker2", alias="gc-worker2"),
         ))
-        self.assertEqual([w["id"] for w in parsed["workers"]], ["gc-grande1", "kr-samet"])
+        self.assertEqual([w["id"] for w in parsed["workers"]], ["gc-worker1", "gc-worker2"])
         self.assertEqual(parsed["chief"], "chief@example.com")
 
     def test_utilization_becomes_remaining_with_reset_countdown(self):
@@ -228,7 +237,7 @@ class GrandeClaudexTests(unittest.TestCase):
         calls.unlink(missing_ok=True)
         body = json.dumps(payload(worker()))
         gdc = self.fake_gdc(f"echo \"$@\" >> '{calls}'\ncat <<'EOF'\n{body}\nEOF\n")
-        self.assertEqual(self.fetch(gdc)["ok"]["workers"][0]["id"], "gc-grande1")
+        self.assertEqual(self.fetch(gdc)["ok"]["workers"][0]["id"], "gc-worker1")
         self.fetch(gdc, probe=True)
         self.assertEqual(calls.read_text().splitlines(), ["usage --json", "usage --json --probe"])
 
@@ -268,6 +277,51 @@ class GrandeClaudexTests(unittest.TestCase):
         path = self.fetch(self.fake_gdc(script))["ok"]["chief"].split(":")
         self.assertEqual(path[0], str(Path.home() / ".local/bin"))
         self.assertIn("/opt/homebrew/bin", path)
+
+    def locate(self, home, path):
+        result = subprocess.run([str(self.binary), "locate", str(home), path], check=True, capture_output=True, text=True)
+        return json.loads(result.stdout)["gdc"]
+
+    def test_gdc_is_found_in_the_user_bin_first_then_on_path(self):
+        home = self.work / "home"
+        elsewhere = self.work / "elsewhere"
+        (home / ".local/bin").mkdir(parents=True, exist_ok=True)
+        elsewhere.mkdir(exist_ok=True)
+        user_gdc = home / ".local/bin/gdc"
+        path_gdc = elsewhere / "gdc"
+        for script in (user_gdc, path_gdc):
+            script.write_text("#!/bin/sh\n")
+            script.chmod(0o755)
+        self.assertEqual(self.locate(home, f"/usr/bin:{elsewhere}"), str(user_gdc))
+        user_gdc.unlink()
+        self.assertEqual(self.locate(home, f"/usr/bin:{elsewhere}"), str(path_gdc))
+
+    def test_gdc_that_cannot_run_is_not_installed(self):
+        home = self.work / "home-without-gdc"
+        bins = self.work / "bins"
+        (home / ".local/bin").mkdir(parents=True, exist_ok=True)
+        (bins / "dir" / "gdc").mkdir(parents=True, exist_ok=True)
+        (bins / "plain").mkdir(exist_ok=True)
+        (bins / "plain" / "gdc").write_text("not executable\n")
+        (bins / "plain" / "gdc").chmod(0o644)
+        # Relative PATH entries are skipped, so a gdc in the working directory does not count.
+        self.assertIsNone(self.locate(home, f"{bins / 'dir'}:{bins / 'plain'}::bins"))
+
+    def tabs(self, stored, installed):
+        result = subprocess.run(
+            [str(self.binary), "tabs", stored, "installed" if installed else "missing"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(result.stdout)
+
+    def test_claudex_tab_only_with_gdc(self):
+        self.assertEqual(self.tabs("claudex", True), {"visible": ["Desktop", "Claudex", "CLIProxy"], "selected": "Claudex"})
+        self.assertEqual(self.tabs("claudex", False), {"visible": ["Desktop", "CLIProxy"], "selected": "Desktop"})
+        self.assertEqual(self.tabs("cliproxy", False)["selected"], "CLIProxy")
+        self.assertEqual(self.tabs("", False)["selected"], "Desktop")
+        self.assertEqual(self.tabs("unknown", True)["selected"], "Desktop")
 
 
 if __name__ == "__main__":
