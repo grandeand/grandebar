@@ -291,7 +291,7 @@ private struct QuotaCard {
     }
 }
 
-private struct LocalUsage {
+struct LocalUsage {
     let today: Double
     let week: Double
     let month: Double
@@ -3769,11 +3769,12 @@ private struct ClaudeQuota {
 }
 
 /// Claude Code cost computed directly from `~/.claude/projects/**/*.jsonl` (subagent and
-/// workflow transcripts included). Claude Code writes one assistant response as several
-/// lines and only the last one carries the final output count, so records are deduplicated
-/// by message id + request id keeping the largest output. `ccusage claude` takes earlier
-/// lines and skips part of the subagent records, which undercounts heavy days by ~15%.
-private enum LocalClaudeUsage {
+/// workflow transcripts included), plus the GrandeClaudex workers' `~/.claude-accounts/*/projects`.
+/// Claude Code writes one assistant response as several lines and only the last one carries
+/// the final output count, so records are deduplicated by message id + request id keeping the
+/// largest output, across every root. `ccusage claude` takes earlier lines and skips part of
+/// the subagent records, which undercounts heavy days by ~15%.
+enum LocalClaudeUsage {
     private struct Entry {
         let date: Date
         let model: String
@@ -3809,13 +3810,13 @@ private enum LocalClaudeUsage {
     private static let usageMarker = Data("\"usage\"".utf8)
     private static let assistantMarker = Data("\"assistant\"".utf8)
 
-    static func read() -> LocalUsage? {
+    static func read(home: String = FileManager.default.homeDirectoryForCurrentUser.path) -> LocalUsage? {
         lock.lock()
         defer { lock.unlock() }
 
         let dates = dateKeys()
         let since = min(dates.weekStart, dates.monthStart)
-        let paths = transcriptPaths(modifiedSince: since)
+        let paths = transcriptPaths(home: home, modifiedSince: since)
         guard !paths.isEmpty else { return nil }
 
         files = files.filter { paths.contains($0.key) }
@@ -3860,12 +3861,17 @@ private enum LocalClaudeUsage {
         return entry.fast ? total * 2 : total
     }
 
-    private static func transcriptPaths(modifiedSince day: String) -> Set<String> {
+    private static func transcriptPaths(home: String, modifiedSince day: String) -> Set<String> {
         let fm = FileManager.default
-        let home = fm.homeDirectoryForCurrentUser.path
         var roots = ["\(home)/.claude/projects", "\(home)/.config/claude/projects"]
         if let configured = ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"] {
             roots += configured.split(separator: ",").map { "\($0)/projects" }
+        }
+        // GrandeClaudex Claude workers (CLAUDE_CONFIG_DIR=~/.claude-accounts/<id>): only their
+        // transcripts are counted, never their auth or config files.
+        let workerRoot = "\(home)/.claude-accounts"
+        for name in ((try? fm.contentsOfDirectory(atPath: workerRoot)) ?? []).sorted() {
+            roots.append("\(workerRoot)/\(name)/projects")
         }
         let cutoff = dayFormatter().date(from: day) ?? .distantPast
         var paths = Set<String>()
