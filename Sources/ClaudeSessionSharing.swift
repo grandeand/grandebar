@@ -106,8 +106,9 @@ final class ClaudeSessionSharing {
         var result = Result()
         let all = storageDirs()
         result.folders = all.count
-        var listing: [URL: [String: Int64]] = [:]
-        for dir in all { listing[dir] = scan(dir) }
+        var stamps: [URL: [String: Stamp]] = [:]
+        for dir in all { stamps[dir] = scan(dir) }
+        let listing = stamps.mapValues { $0.mapValues(\.mtime) }
         // A folder that cannot be listed is unknown, not empty: it is neither read nor written
         // this pass, and what is on record for it stays.
         let dirs = all.filter { listing[$0] != nil }
@@ -205,6 +206,15 @@ final class ClaudeSessionSharing {
         //    folder it has loaded, so the signed-in account's folders wait until it is closed.
         // Read again in case Desktop signed in elsewhere or started since the pass began.
         if !desktopClosed, !closed || isDesktopRunning() { loaded.formUnion(signedInFolders(dirs)) }
+        // A pass that found Desktop stopped asks again right before each write into the
+        // signed-in account's folders; once Desktop runs, they wait for the next time it is closed.
+        let recheck = closed && !desktopClosed ? signedInFolders(dirs) : []
+        func mayWrite(_ dir: URL) -> Bool {
+            guard !loaded.contains(dir) else { return false }
+            guard recheck.contains(dir), isDesktopRunning() else { return true }
+            loaded.formUnion(recheck)
+            return false
+        }
         func newest(_ name: String, in candidates: [URL]) -> (mtime: Int64, url: URL)? {
             var best: (mtime: Int64, url: URL)?
             for dir in candidates {
@@ -245,7 +255,9 @@ final class ClaudeSessionSharing {
             for dir in targets {
                 let isNew = listing[dir]?[name] == nil
                 do {
-                    try atomicCopy(source.url, to: dir.appendingPathComponent(name), contents: contents)
+                    // A copy held back (Desktop saved it or started meanwhile) keeps its old record.
+                    guard try replace(dir.appendingPathComponent(name), listed: stamps[dir]?[name], with: contents,
+                                      mtime: source.mtime, mayWrite: { mayWrite(dir) }) else { continue }
                     ledger.copies[folderKey(dir), default: [:]][id] = Ledger.Copy(mtime: source.mtime, archived: archived)
                     if isNew { result.added += 1 } else { result.updated += 1 }
                 } catch {
@@ -329,18 +341,27 @@ final class ClaudeSessionSharing {
         return lstat(url.path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFDIR
     }
 
-    /// name -> mtime in nanoseconds for local_*/deleted_* entries, stat only; nil when the folder
-    /// cannot be listed.
-    private func scan(_ dir: URL) -> [String: Int64]? {
+    /// Which version of a file was listed.
+    private struct Stamp: Equatable {
+        /// Nanoseconds.
+        let mtime: Int64
+        let inode: UInt64
+    }
+
+    /// name -> stamp for local_*/deleted_* entries, stat only; nil when the folder cannot be listed.
+    private func scan(_ dir: URL) -> [String: Stamp]? {
         guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return nil }
-        var out: [String: Int64] = [:]
+        var out: [String: Stamp] = [:]
         for name in names where Self.sessionID(name) != nil || Self.tombstoneID(name) != nil {
-            var info = stat()
-            if lstat(dir.appendingPathComponent(name).path, &info) == 0 {
-                out[name] = Int64(info.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(info.st_mtimespec.tv_nsec)
-            }
+            out[name] = stamp(dir.appendingPathComponent(name))
         }
         return out
+    }
+
+    private func stamp(_ url: URL) -> Stamp? {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { return nil }
+        return Stamp(mtime: Int64(info.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(info.st_mtimespec.tv_nsec), inode: UInt64(info.st_ino))
     }
 
     // MARK: Ledger
@@ -361,9 +382,39 @@ final class ClaudeSessionSharing {
 
     // MARK: Copying
 
-    /// Clone (or write `contents`) into a temp file on the same volume, copy the source's exact
-    /// timestamps, then rename over. The destination may be the source itself.
-    private func atomicCopy(_ source: URL, to destination: URL, contents: Data? = nil) throws {
+    /// Tombstones never change: clone into a temp file on the same volume, copy the source's
+    /// exact timestamps, then rename over.
+    private func atomicCopy(_ source: URL, to destination: URL) throws {
+        var info = stat()
+        guard lstat(source.path, &info) == 0 else { throw CocoaError(.fileReadNoSuchFile) }
+        let tmp = try staged(for: destination, times: [info.st_atimespec, info.st_mtimespec]) { try fm.copyItem(at: source, to: $0) }
+        defer { try? fm.removeItem(at: tmp) }
+        guard rename(tmp.path, destination.path) == 0 else { throw CocoaError(.fileWriteUnknown) }
+    }
+
+    /// Writes a session copy with the source's mtime, but only while the destination is still the
+    /// version that was listed (or still missing) and `mayWrite` agrees, both checked right before
+    /// the rename. False when the copy is left for the next pass.
+    private func replace(_ destination: URL, listed: Stamp?, with contents: Data, mtime: Int64,
+                         mayWrite: () -> Bool) throws -> Bool {
+        let time = timespec(tv_sec: Int(mtime / 1_000_000_000), tv_nsec: Int(mtime % 1_000_000_000))
+        let tmp = try staged(for: destination, times: [time, time]) { try contents.write(to: $0) }
+        defer { try? fm.removeItem(at: tmp) }
+        guard mayWrite(), stamp(destination) == listed else { return false }
+        if listed == nil {
+            // Never replaces a file that appeared since the check.
+            guard renamex_np(tmp.path, destination.path, UInt32(RENAME_EXCL)) == 0 else {
+                if errno == EEXIST { return false }
+                throw CocoaError(.fileWriteUnknown)
+            }
+        } else if rename(tmp.path, destination.path) != 0 {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return true
+    }
+
+    /// A temp file next to the session folders, filled by `fill`, with the given timestamps.
+    private func staged(for destination: URL, times: [timespec], fill: (URL) throws -> Void) throws -> URL {
         var root = destination
         while root.lastPathComponent != "claude-code-sessions" && root.path != "/" {
             root.deleteLastPathComponent()
@@ -371,19 +422,16 @@ final class ClaudeSessionSharing {
         let tmpDir = root.deletingLastPathComponent().appendingPathComponent(Self.tmpName)
         try fm.createDirectory(at: tmpDir, withIntermediateDirectories: true)
         let tmp = tmpDir.appendingPathComponent(UUID().uuidString)
-        defer { try? fm.removeItem(at: tmp) }
-        if let contents {
-            try contents.write(to: tmp)
-        } else {
-            try fm.copyItem(at: source, to: tmp)
-        }
-
-        var info = stat()
-        guard lstat(source.path, &info) == 0 else { throw CocoaError(.fileReadNoSuchFile) }
-        var times = [info.st_atimespec, info.st_mtimespec]
-        guard utimensat(AT_FDCWD, tmp.path, &times, 0) == 0, chmod(tmp.path, 0o600) == 0,
-              rename(tmp.path, destination.path) == 0 else {
-            throw CocoaError(.fileWriteUnknown)
+        do {
+            try fill(tmp)
+            var times = times
+            guard utimensat(AT_FDCWD, tmp.path, &times, 0) == 0, chmod(tmp.path, 0o600) == 0 else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            return tmp
+        } catch {
+            try? fm.removeItem(at: tmp)
+            throw error
         }
     }
 

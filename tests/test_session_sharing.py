@@ -504,6 +504,37 @@ class ArchiveTests(Sandbox):
         self.sync()
         self.assertEqual(self.read(self.a, added)["title"], "New on B")
 
+    def test_desktop_saving_during_a_pass_is_not_overwritten(self):
+        self.signed_in(ACCOUNT_A)
+        first, later = sorted([self.shared(), self.shared()])
+        for sid in (first, later):
+            self.write(self.b, sid, age=100, title="Newer on B")
+        mtime = self.mtime(self.a, first)
+        # The pass starts with Desktop stopped. Desktop starts, loads A and saves `later` while
+        # GrandeBar is still copying, before its process shows up as running.
+        self.write(self.a, later, suffix=".flush", title="Saved by Desktop")
+        self.sync(mode="quit:999:2")
+        self.assertEqual(self.read(self.a, later)["title"], "Saved by Desktop")
+        self.assertEqual(self.read(self.a, first)["title"], "Newer on B")
+        self.assertNotEqual(self.mtime(self.a, first), mtime)
+        # Desktop's save is the newest copy and reaches every folder next time.
+        self.sync(closed=True)
+        self.assertEqual([self.read(folder, later)["title"] for folder in self.folders], ["Saved by Desktop"] * 3)
+
+    def test_signed_in_folders_are_left_alone_once_desktop_starts_mid_pass(self):
+        self.signed_in(ACCOUNT_A)
+        sids = [self.shared() for _ in range(3)]
+        before = {sid: (self.mtime(self.a, sid), self.text(self.a, sid)) for sid in sids}
+        for sid in sids:
+            self.write(self.b, sid, age=100, isArchived=True)
+        # Desktop is stopped at the start and shows up as running from the third check on.
+        self.sync(mode="quit:3")
+        self.assertEqual({sid: (self.mtime(self.a, sid), self.text(self.a, sid)) for sid in sids}, before)
+        self.assertEqual([self.read(self.c, sid)["isArchived"] for sid in sids], [True, True, True])
+        # The next time Desktop is closed, A catches up.
+        self.sync(closed=True)
+        self.assertEqual([self.read(self.a, sid)["isArchived"] for sid in sids], [True, True, True])
+
     def test_a_failed_write_is_tried_again(self):
         self.signed_in(ACCOUNT_A)
         sid = self.shared()
