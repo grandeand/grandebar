@@ -5281,6 +5281,12 @@ extension QuotaViewController {
                         "Yeni eklenen oturumlar Claude Desktop bir sonraki açılışında görünür (hesap geçişi de yeniden başlatır)."
                     )
                 }
+                if result.failed > 0 {
+                    info += "\n\n" + L.text(
+                        "\(result.failed) copies could not be written; GrandeBar tries them again on the next sync.",
+                        "\(result.failed) kopya yazılamadı; GrandeBar bir sonraki eşitlemede yeniden dener."
+                    )
+                }
                 self.notify(L.text("Code sessions synced", "Code oturumları eşitlendi"), info)
             }
         }

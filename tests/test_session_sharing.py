@@ -16,7 +16,10 @@ HARNESS = """
 import Foundation
 
 func emit(_ result: ClaudeSessionSharing.Result) {
-    let object: [String: Int] = ["added": result.added, "updated": result.updated, "removed": result.removed, "folders": result.folders]
+    let object: [String: Int] = [
+        "added": result.added, "updated": result.updated, "removed": result.removed,
+        "folders": result.folders, "failed": result.failed
+    ]
     let data = try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     print(String(data: data, encoding: .utf8)!)
 }
@@ -34,35 +37,44 @@ default:
 SECOND = 1_000_000_000
 ACCOUNT_A = "aaaaaaaa-0000-4000-8000-000000000001"
 ACCOUNT_B = "bbbbbbbb-0000-4000-8000-000000000002"
+ACCOUNT_C = "cccccccc-0000-4000-8000-000000000003"
+ACCOUNT_3P = "dddddddd-0000-4000-8000-000000000004"
 ORG = "0000000a-0000-4000-8000-00000000000a"
+ORG_3P = "00000000-0000-4000-8000-000000000001"
+SCRATCH = "/Users/someone/Library/Application Support/Claude/scratch-workspaces/x/y/scratch-1"
+
+WORK = None
+BINARY = None
+
+
+def setUpModule():
+    global WORK, BINARY
+    if not shutil.which("swiftc"):
+        return
+    WORK = Path(tempfile.mkdtemp(prefix="session-sharing-test."))
+    sources = WORK / "harness"
+    sources.mkdir()
+    (sources / "main.swift").write_text(HARNESS)
+    BINARY = WORK / "harness-bin"
+    subprocess.run(["swiftc", *map(str, SOURCES), str(sources / "main.swift"), "-o", str(BINARY)], check=True, capture_output=True)
+
+
+def tearDownModule():
+    if WORK:
+        shutil.rmtree(WORK, ignore_errors=True)
 
 
 @unittest.skipUnless(shutil.which("swiftc"), "swiftc is not available")
-class SessionSharingTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.work = Path(tempfile.mkdtemp(prefix="session-sharing-test."))
-        sources = cls.work / "harness"
-        sources.mkdir()
-        (sources / "main.swift").write_text(HARNESS)
-        cls.binary = cls.work / "harness-bin"
-        subprocess.run(
-            ["swiftc", *map(str, SOURCES), str(sources / "main.swift"), "-o", str(cls.binary)],
-            check=True,
-            capture_output=True,
-        )
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.work, ignore_errors=True)
+class Sandbox(unittest.TestCase):
+    """A fake home with Claude Desktop's session folders; GrandeBar's pass runs against it."""
 
     def setUp(self):
-        self.home = Path(tempfile.mkdtemp(prefix="home.", dir=self.work))
+        self.home = Path(tempfile.mkdtemp(prefix="home.", dir=WORK))
         self.support = self.home / "Library" / "Application Support"
         self.a = self.folder("Claude", ACCOUNT_A)
         self.b = self.folder("Claude", ACCOUNT_B)
-
-    # Fixtures
+        self.c = self.folder("Claude", ACCOUNT_C)
+        self.folders = [self.a, self.b, self.c]
 
     def folder(self, profile, account, org=ORG):
         path = self.support / profile / "claude-code-sessions" / account / org
@@ -70,7 +82,7 @@ class SessionSharingTests(unittest.TestCase):
         return path
 
     def write(self, folder, sid, age=60.0, **fields):
-        """Writes a session file as Desktop would, `age` seconds old."""
+        """Writes a session file as Desktop would, `age` seconds ago."""
         record = {
             "sessionId": f"local_{sid}",
             "cwd": "/Users/someone/Projects/app",
@@ -92,18 +104,41 @@ class SessionSharingTests(unittest.TestCase):
         path = folder / f"local_{sid}.json"
         return json.loads(path.read_text()) if path.exists() else None
 
+    def text(self, folder, sid):
+        return (folder / f"local_{sid}.json").read_text()
+
     def mtime(self, folder, sid):
         return (folder / f"local_{sid}.json").stat().st_mtime_ns
 
+    def archived(self, sid, *folders):
+        return [self.read(folder, sid)["isArchived"] for folder in folders]
+
+    def signed_in(self, account, profile="Claude"):
+        """Desktop's record of the account it is signed into: that account's folders count as loaded."""
+        claude = self.support / "Claude"
+        mode = "3p" if profile == "Claude-3p" else "1p"
+        (claude / "claude_desktop_config.json").write_text(json.dumps({"deploymentMode": mode}))
+        (self.support / profile / "config.json").write_text(json.dumps({"lastKnownAccountUuid": account}))
+
+    def shared(self, age=600, **fields):
+        """A session already in every folder, as earlier passes left it."""
+        sid = str(uuid.uuid4())
+        self.write(self.a, sid, age=age, **fields)
+        self.sync(closed=True)
+        return sid
+
+    def ledger(self):
+        return self.support / "GrandeBar" / "ClaudeSessionArchive.json"
+
     def sync(self, closed=False):
         result = subprocess.run(
-            [str(self.binary), "sync", str(self.home), "closed" if closed else "running"],
+            [str(BINARY), "sync", str(self.home), "closed" if closed else "running"],
             check=True, capture_output=True, text=True,
         )
         return json.loads(result.stdout)
 
-    # Closed sync
 
+class ClosedSyncTests(Sandbox):
     def test_running_sync_holds_back_a_copy_still_being_written(self):
         sid = str(uuid.uuid4())
         self.write(self.a, sid, age=0.2, title="Fresh")
@@ -111,40 +146,220 @@ class SessionSharingTests(unittest.TestCase):
         self.assertIsNone(self.read(self.b, sid))
 
     def test_closed_sync_copies_what_desktop_flushed_as_it_quit(self):
-        sid = str(uuid.uuid4())
-        self.write(self.a, sid, age=600, title="Before")
-        self.sync()
+        sid = self.shared(title="Before")
         self.write(self.a, sid, age=0.2, title="Flushed on quit")
-        self.assertEqual(self.sync(closed=True)["updated"], 1)
+        self.assertEqual(self.sync(closed=True)["updated"], 2)
         self.assertEqual(self.read(self.b, sid)["title"], "Flushed on quit")
         self.assertEqual(self.mtime(self.a, sid), self.mtime(self.b, sid))
 
-    # Claude-3p
+    def test_closed_sync_spreads_an_archive_flushed_as_desktop_quit(self):
+        self.signed_in(ACCOUNT_A)
+        sid = self.shared()
+        self.write(self.a, sid, age=0.2, isArchived=True)
+        self.sync()
+        self.assertEqual(self.archived(sid, self.b, self.c), [False, False])
+        self.sync(closed=True)
+        self.assertEqual(self.archived(sid, *self.folders), [True, True, True])
+
+
+class ThirdPartyTests(Sandbox):
+    def setUp(self):
+        super().setUp()
+        self.third = self.folder("Claude-3p", ACCOUNT_3P, ORG_3P)
 
     def test_stale_third_party_copy_of_a_scratch_session_never_wins(self):
-        third = self.folder("Claude-3p", "cccccccc-0000-4000-8000-000000000003", "00000000-0000-4000-8000-000000000001")
-        sid = str(uuid.uuid4())
-        scratch = "/Users/someone/Library/Application Support/Claude/scratch-workspaces/x/y/scratch-1"
-        for folder in (self.a, self.b):
-            self.write(folder, sid, age=600, cwd=scratch, isArchived=True)
-        self.sync()
-        before = {folder: self.mtime(folder, sid) for folder in (self.a, self.b)}
+        sid = self.shared(cwd=SCRATCH, isArchived=True)
+        self.assertIsNone(self.read(self.third, sid))
+        before = {folder: self.mtime(folder, sid) for folder in self.folders}
         # Desktop in CLIProxy mode saves its old, un-archived copy: the newest file now.
-        self.write(third, sid, age=30, cwd=scratch, isArchived=False, title="Stale")
+        self.write(self.third, sid, age=30, cwd=SCRATCH, isArchived=False, title="Stale")
         self.sync()
-        for folder in (self.a, self.b):
+        self.sync(closed=True)
+        for folder in self.folders:
             self.assertTrue(self.read(folder, sid)["isArchived"])
             self.assertEqual(self.mtime(folder, sid), before[folder])
-        self.assertEqual(self.read(third, sid)["title"], "Stale")
+        self.assertEqual(self.read(self.third, sid)["title"], "Stale")
 
     def test_third_party_still_shares_sessions_in_project_folders(self):
-        third = self.folder("Claude-3p", "cccccccc-0000-4000-8000-000000000003", "00000000-0000-4000-8000-000000000001")
-        sid = str(uuid.uuid4())
-        self.write(self.a, sid, age=600)
-        self.write(third, sid, age=30, title="Newer in CLIProxy")
+        sid = self.shared()
+        self.write(self.third, sid, age=30, title="Newer in CLIProxy", isArchived=True)
         self.sync()
-        self.assertEqual(self.read(self.a, sid)["title"], "Newer in CLIProxy")
-        self.assertEqual(self.read(self.b, sid)["title"], "Newer in CLIProxy")
+        for folder in self.folders:
+            self.assertEqual(self.read(folder, sid)["title"], "Newer in CLIProxy")
+            self.assertTrue(self.read(folder, sid)["isArchived"])
+
+    def test_third_party_profile_is_left_alone_while_desktop_runs_on_it(self):
+        self.signed_in(ACCOUNT_3P, profile="Claude-3p")
+        sid = self.shared()
+        self.write(self.a, sid, age=30, isArchived=True)
+        self.sync()
+        self.assertFalse(self.read(self.third, sid)["isArchived"])
+        self.assertEqual(self.archived(sid, self.b, self.c), [True, True])
+
+
+class ArchiveTests(Sandbox):
+    def test_stale_save_in_the_loaded_folder_does_not_undo_an_archive(self):
+        self.signed_in(ACCOUNT_B)
+        sid = self.shared()
+        # Archived on A in an earlier run, while Desktop now has B loaded with the old copy.
+        self.write(self.a, sid, age=100, isArchived=True, title="Archived on A")
+        self.sync()
+        self.assertEqual(self.archived(sid, *self.folders), [True, False, True])
+        # Desktop saves its in-memory copy of B: newer, but the same isArchived B already held.
+        self.write(self.b, sid, age=50, isArchived=False, title="Saved on B")
+        self.sync()
+        self.assertEqual(self.archived(sid, *self.folders), [True, False, True])
+        self.assertEqual(self.read(self.c, sid)["title"], "Saved on B")
+        # The switch: Desktop is closed, so B gets the archive too, keeping B's own mtime.
+        mtime = self.mtime(self.b, sid)
+        self.sync(closed=True)
+        self.assertEqual(self.archived(sid, *self.folders), [True, True, True])
+        self.assertEqual(self.read(self.b, sid)["title"], "Saved on B")
+        self.assertEqual(self.mtime(self.b, sid), mtime)
+
+    def test_unarchive_after_an_archive_wins_and_sets_auto_archive_exempt(self):
+        self.signed_in(ACCOUNT_A)
+        sid = self.shared()
+        self.write(self.a, sid, age=300, isArchived=True)
+        self.sync()
+        self.assertEqual(self.archived(sid, *self.folders), [True, True, True])
+        # Un-archived on B (an earlier CLIProxy or account run), then A, still loaded and
+        # unaware of it, saves its archived copy over its own folder.
+        self.write(self.b, sid, age=200, isArchived=False)
+        self.write(self.a, sid, age=100, isArchived=True, title="Saved on A")
+        self.sync()
+        for folder in (self.b, self.c):
+            session = self.read(folder, sid)
+            self.assertFalse(session["isArchived"])
+            self.assertTrue(session["autoArchiveExempt"])
+            self.assertEqual(session["title"], "Saved on A")
+        self.assertTrue(self.read(self.a, sid)["isArchived"])
+        self.sync(closed=True)
+        self.assertEqual(self.archived(sid, *self.folders), [False, False, False])
+        self.assertTrue(self.read(self.a, sid)["autoArchiveExempt"])
+
+    def test_archive_unarchive_archive_across_switches(self):
+        self.signed_in(ACCOUNT_A)
+        sid = self.shared()
+        self.write(self.a, sid, age=300, isArchived=True)
+        self.sync()
+        self.signed_in(ACCOUNT_B)
+        self.sync(closed=True)
+        self.write(self.b, sid, age=200, isArchived=False, autoArchiveExempt=True)
+        self.sync()
+        self.assertEqual(self.archived(sid, *self.folders), [False, False, False])
+        self.signed_in(ACCOUNT_A)
+        self.sync(closed=True)
+        self.write(self.a, sid, age=100, isArchived=True, autoArchiveExempt=True)
+        self.sync()
+        self.assertEqual(self.archived(sid, *self.folders), [True, True, True])
+        self.sync(closed=True)
+        self.assertEqual(self.archived(sid, *self.folders), [True, True, True])
+
+    def test_auto_archive_spreads_like_a_manual_one(self):
+        self.signed_in(ACCOUNT_A)
+        sid = self.shared(lastActivityAt=1_780_000_000_000)
+        # Desktop's 7-day rule archives through the same save: only isArchived changes.
+        self.write(self.a, sid, age=30, isArchived=True, lastActivityAt=1_780_000_000_000)
+        self.sync()
+        for folder in (self.b, self.c):
+            self.assertEqual(self.read(folder, sid), self.read(self.a, sid))
+
+    def test_delete_beats_archive(self):
+        self.signed_in(ACCOUNT_A)
+        sid = self.shared()
+        self.write(self.a, sid, age=100, isArchived=True)
+        self.sync()
+        (self.b / f"deleted_{sid}").write_text("1790000000000")
+        self.assertEqual(self.sync()["removed"], 3)
+        for folder in self.folders:
+            self.assertIsNone(self.read(folder, sid))
+            self.assertTrue((folder / f"deleted_{sid}").exists())
+        # A later save of the session somewhere, archived or not, is deleted again.
+        self.write(self.c, sid, age=10, isArchived=False)
+        self.assertEqual(self.sync()["removed"], 1)
+        self.assertIsNone(self.read(self.c, sid))
+        self.assertNotIn(sid, json.loads(self.ledger().read_text())["archive"])
+
+    def test_first_run_starts_from_the_newest_copy(self):
+        newer, tie = str(uuid.uuid4()), str(uuid.uuid4())
+        self.write(self.a, newer, age=100, isArchived=True, title="Newest")
+        self.write(self.b, newer, age=200, isArchived=False)
+        self.write(self.c, newer, age=300, isArchived=False)
+        # Equal mtimes that disagree: the first folder in order wins, every time.
+        self.write(self.b, tie, age=150, isArchived=False)
+        self.write(self.a, tie, age=150, isArchived=True, title="First folder")
+        stamp = self.mtime(self.a, tie)
+        os.utime(self.b / f"local_{tie}.json", ns=(stamp, stamp))
+        self.sync()
+        self.assertEqual(self.archived(newer, *self.folders), [True, True, True])
+        self.assertEqual(self.read(self.c, newer)["title"], "Newest")
+        self.assertEqual(self.archived(tie, *self.folders), [True, True, True])
+        self.assertEqual(self.read(self.b, tie)["title"], "First folder")
+
+    def test_repeated_passes_change_nothing(self):
+        self.signed_in(ACCOUNT_A)
+        kept, archived = self.shared(), self.shared()
+        self.write(self.a, archived, age=100, isArchived=True)
+        self.sync()
+        self.sync(closed=True)
+        files = sorted(self.support.rglob("local_*.json"))
+        before = {path: (path.stat().st_mtime_ns, path.read_bytes()) for path in files}
+        ledger = (self.ledger().stat().st_mtime_ns, self.ledger().read_bytes())
+        for closed in (False, True, False):
+            result = self.sync(closed=closed)
+            self.assertEqual({key: result[key] for key in ("added", "updated", "removed", "failed")},
+                             {"added": 0, "updated": 0, "removed": 0, "failed": 0})
+        self.assertEqual({path: (path.stat().st_mtime_ns, path.read_bytes()) for path in files}, before)
+        self.assertEqual((self.ledger().stat().st_mtime_ns, self.ledger().read_bytes()), ledger)
+        self.assertEqual(self.archived(kept, *self.folders), [False, False, False])
+
+    def test_only_the_archive_values_change_in_a_patched_copy(self):
+        self.signed_in(ACCOUNT_B)
+        sid = self.shared()
+        self.write(self.a, sid, age=200, isArchived=True)
+        self.sync()
+        self.write(self.b, sid, age=100, isArchived=False, title="Saved on B")
+        self.sync()
+        source = self.text(self.b, sid)
+        self.assertEqual(self.text(self.c, sid), source.replace('"isArchived":false', '"isArchived":true', 1))
+        self.assertTrue(self.read(self.c, sid)["spawnSeed"]["isArchived"])
+
+    def test_a_patched_unarchive_adds_auto_archive_exempt_and_nothing_else(self):
+        self.signed_in(ACCOUNT_A)
+        sid = self.shared()
+        self.write(self.a, sid, age=300, isArchived=True)
+        self.sync()
+        self.write(self.b, sid, age=200, isArchived=False)
+        self.write(self.a, sid, age=100, isArchived=True, title="Saved on A")
+        self.sync()
+        source = self.text(self.a, sid)
+        expected = '{"autoArchiveExempt":true,' + source[1:].replace('"isArchived":true', '"isArchived":false', 1)
+        self.assertEqual(self.text(self.c, sid), expected)
+
+    def test_signed_in_folder_waits_while_desktop_runs(self):
+        self.signed_in(ACCOUNT_A)
+        sid = self.shared()
+        before = self.mtime(self.a, sid)
+        self.write(self.b, sid, age=30, title="Newer on B")
+        self.sync()
+        self.assertEqual(self.mtime(self.a, sid), before)
+        self.assertEqual(self.read(self.c, sid)["title"], "Newer on B")
+        self.sync(closed=True)
+        self.assertEqual(self.read(self.a, sid)["title"], "Newer on B")
+
+    def test_a_failed_write_is_tried_again(self):
+        self.signed_in(ACCOUNT_A)
+        sid = self.shared()
+        self.write(self.a, sid, age=30, isArchived=True)
+        self.c.chmod(0o500)
+        try:
+            self.assertEqual(self.sync()["failed"], 1)
+            self.assertFalse(self.read(self.c, sid)["isArchived"])
+        finally:
+            self.c.chmod(0o700)
+        self.assertEqual(self.sync()["updated"], 1)
+        self.assertTrue(self.read(self.c, sid)["isArchived"])
 
 
 if __name__ == "__main__":
