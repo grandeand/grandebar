@@ -100,11 +100,15 @@ final class ClaudeSessionSharing {
         lock.lock()
         defer { lock.unlock() }
         var result = Result()
-        let dirs = storageDirs()
-        result.folders = dirs.count
-        guard dirs.count >= 2 else { return result }
+        let all = storageDirs()
+        result.folders = all.count
         var listing: [URL: [String: Int64]] = [:]
-        for dir in dirs { listing[dir] = scan(dir) }
+        for dir in all { listing[dir] = scan(dir) }
+        // A folder that cannot be listed is unknown, not empty: it is neither read nor written
+        // this pass, and what is on record for it stays.
+        let dirs = all.filter { listing[$0] != nil }
+        let unknown = Set(all.filter { listing[$0] == nil }.map(folderKey))
+        guard dirs.count >= 2 else { return result }
         let now = Self.nowNanoseconds()
         let settle = desktopClosed ? 0 : Self.settleNanoseconds
         func settled(_ mtime: Int64) -> Bool { now - mtime >= settle }
@@ -139,7 +143,7 @@ final class ClaudeSessionSharing {
                 tombSource[id] = nil
                 continue
             }
-            var held: [String] = []
+            var held = (ledger.tombstones[id] ?? []).filter(unknown.contains)
             for dir in dirs {
                 if listing[dir]?[tomb] != nil || (try? atomicCopy(source, to: dir.appendingPathComponent(tomb))) != nil {
                     held.append(folderKey(dir))
@@ -189,7 +193,7 @@ final class ClaudeSessionSharing {
         }
         let ids = Set(names.compactMap(Self.sessionID))
         ledger.archive = ledger.archive.filter { ids.contains($0.key) }
-        ledger.copies = ledger.copies.filter { folderKeys.contains($0.key) }
+        ledger.copies = ledger.copies.filter { folderKeys.contains($0.key) || unknown.contains($0.key) }
         // Saved before anything is written, so an interrupted pass replays the same decisions.
         persist()
 
@@ -321,10 +325,12 @@ final class ClaudeSessionSharing {
         return lstat(url.path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFDIR
     }
 
-    /// name -> mtime in nanoseconds for local_*/deleted_* entries, stat only.
-    private func scan(_ dir: URL) -> [String: Int64] {
+    /// name -> mtime in nanoseconds for local_*/deleted_* entries, stat only; nil when the folder
+    /// cannot be listed.
+    private func scan(_ dir: URL) -> [String: Int64]? {
+        guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return nil }
         var out: [String: Int64] = [:]
-        for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] where Self.sessionID(name) != nil || Self.tombstoneID(name) != nil {
+        for name in names where Self.sessionID(name) != nil || Self.tombstoneID(name) != nil {
             var info = stat()
             if lstat(dir.appendingPathComponent(name).path, &info) == 0 {
                 out[name] = Int64(info.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(info.st_mtimespec.tv_nsec)

@@ -313,6 +313,37 @@ class ArchiveTests(Sandbox):
         self.assertIsNone(self.read(self.c, sid))
         self.assertNotIn(sid, json.loads(self.ledger().read_text())["archive"])
 
+    def test_an_unreadable_folder_keeps_every_tombstone(self):
+        sid = self.shared()
+        (self.a / f"deleted_{sid}").write_text("1790000000000")
+        self.sync()
+        self.assertTrue(all((folder / f"deleted_{sid}").exists() for folder in self.folders))
+        self.c.chmod(0o000)
+        try:
+            self.sync()
+            self.sync(closed=True)
+        finally:
+            self.c.chmod(0o700)
+        for folder in self.folders:
+            self.assertTrue((folder / f"deleted_{sid}").exists())
+        # The session stays deleted: a later save of it is removed again.
+        self.write(self.b, sid, age=10)
+        self.sync()
+        self.assertIsNone(self.read(self.b, sid))
+
+    def test_an_unreadable_folder_keeps_its_archive_record(self):
+        sid = self.shared()
+        self.write(self.a, sid, age=100, isArchived=True)
+        self.sync()
+        self.c.chmod(0o000)
+        try:
+            self.assertEqual(self.sync()["failed"], 0)
+        finally:
+            self.c.chmod(0o700)
+        # C's copy is still on record, so its old state is not mistaken for a new action.
+        self.sync(closed=True)
+        self.assertEqual(self.archived(sid, *self.folders), [True, True, True])
+
     def test_tombstone_desktop_removed_on_a_cli_import_is_removed_everywhere(self):
         self.signed_in(ACCOUNT_A)
         sid = str(uuid.uuid4())
