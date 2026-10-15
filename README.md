@@ -17,7 +17,7 @@ The app sits in your macOS menu bar, shows the combined session pool percentage,
 - Reset credit count and nearest reset expiry.
 - One-click access to the Management Center quota page.
 - Auto refresh: manual, 5, 10, 15, 30, or 60 minutes.
-- Local token cost across **all Codex homes** (`~/.codex` + `codex-grande` / `aof` / `main` isolated profiles, `sessions` and `archived_sessions`) at standard pricing. Usage is the growth of each transcript's `total_token_usage`, so re-emitted `token_count` events are not counted twice.
+- Local token cost across **all Codex homes** (`~/.codex` + `codex-grande` / `aof` / `main` isolated profiles, GrandeClaudex Codex workers in `~/.codex-workers/<id>/codex`, `sessions` and `archived_sessions`) at standard pricing. Usage is the growth of each transcript's `total_token_usage`, so re-emitted `token_count` events are not counted twice.
 - Copyable English summary with token cost, remaining quota, reset credits, and per-account remaining.
 - **Manual session warm**: the flame button opens cold 5h windows through the configured remote management API.
 - Header status lines: `N account · R reset` plus `locked · open · cold/warmed` detail.
@@ -32,6 +32,7 @@ The app sits in your macOS menu bar, shows the combined session pool percentage,
 - **Model-scoped weekly limits**: when only Claude's Fable weekly limit runs out, the 5h session still counts as usable (other models keep working); only a used-up general weekly limit zeroes it.
 - **Active account in the menu bar** (Claude mode): while Claude Desktop (or, failing that, Claude Code) is signed into claude.ai, the menu bar shows that account's 5h and weekly percentages and marks its row with a dot. Through CLIProxy it shows the pool total.
 - **Claude Desktop's own quota**: when the account Desktop is signed into is not in CLIProxy, GrandeBar asks the usage API with Desktop's own login, the same request behind Desktop's usage screen. It shows that account on top as `<plan> · Desktop`, outside the pool totals. The last read of every saved Desktop account is kept: after a switch the other accounts stay in the list (and in the account menu) with their last known values and when they were read. A window whose reset time has passed shows as full again. The login is read from Desktop's `config.json` (`oauth:tokenCacheV2`, decrypted with the "Claude Safe Storage" Keychain key) and only kept in memory; it is never written or refreshed. macOS asks once for Keychain access; because releases are ad-hoc signed, "Always Allow" lasts until the next update.
+- **Limit tabs** (Claude mode): the list splits into `Desktop`, `CLIProxy` and `GrandeClaudex` (Claude workers read from `gdc usage --json`; its refresh button runs `gdc usage --json --probe`, nothing probes automatically). The GrandeClaudex accounts stay out of the pool totals and the menu bar, and the selected tab is remembered.
 
 ## Requirements
 

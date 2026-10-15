@@ -14,8 +14,24 @@ private enum AppMode: String, CaseIterable {
     }
 }
 
+/// Claude mode's limit list is split by where the accounts come from.
+private enum ClaudeLimitsTab: String, CaseIterable {
+    case desktop
+    case cliproxy
+    case grandeClaudex
+
+    var title: String {
+        switch self {
+        case .desktop: return "Desktop"
+        case .cliproxy: return "CLIProxy"
+        case .grandeClaudex: return "GrandeClaudex"
+        }
+    }
+}
+
 private enum AppConfig {
     static let modeKey = "appMode"
+    static let claudeTabKey = "claudeLimitsTab"
     static let startModeKey = "startMode"
     static let startModeOptions = ["last", "codex", "claude"]
     static let defaultAPIBase = "http://localhost:8317"
@@ -49,6 +65,14 @@ private enum AppConfig {
 
     static func setMode(_ mode: AppMode) {
         UserDefaults.standard.set(mode.rawValue, forKey: modeKey)
+    }
+
+    static func claudeTab() -> ClaudeLimitsTab {
+        ClaudeLimitsTab(rawValue: UserDefaults.standard.string(forKey: claudeTabKey) ?? "") ?? .desktop
+    }
+
+    static func setClaudeTab(_ tab: ClaudeLimitsTab) {
+        UserDefaults.standard.set(tab.rawValue, forKey: claudeTabKey)
     }
 
     static func apiBase() -> String {
@@ -497,6 +521,13 @@ final class QuotaViewController: NSViewController {
     private var desktopCard: (uuid: String, card: QuotaCard)?
     private var desktopFetchInFlight = false
     private var latestUsage: LocalUsage?
+    /// What the CLIProxy tab shows when it has no pool to list.
+    private var cliproxyProblem: String?
+    /// GrandeClaudex workers: the cache is read on every refresh, probing is a button.
+    private var grandeClaudex: GrandeClaudexSnapshot?
+    private var grandeClaudexProblem: String?
+    private var grandeClaudexReading = false
+    private var grandeClaudexProbing = false
 
     init(statusUpdate: @escaping (String, String) -> Void) {
         self.statusUpdate = statusUpdate
@@ -677,6 +708,7 @@ final class QuotaViewController: NSViewController {
             renderWithoutProxy()
             refreshLocalUsage()
             refreshDesktopUsage()
+            refreshGrandeClaudex()
             return
         }
         isRefreshing = true
@@ -708,6 +740,7 @@ final class QuotaViewController: NSViewController {
                     self.renderError(error.localizedDescription)
                 }
                 self.refreshDesktopUsage()
+                self.refreshGrandeClaudex()
             }
         }
     }
@@ -773,6 +806,7 @@ final class QuotaViewController: NSViewController {
         warmNewClearWorkItem?.cancel()
         latestCards = cardsByMode[mode] ?? []
         latestUsage = nil
+        cliproxyProblem = nil
         onModeChange?()
         reloadViewForAppearance()
         if latestCards.isEmpty {
@@ -1212,9 +1246,9 @@ final class QuotaViewController: NSViewController {
         updateStatusItem(cards: cards, summary: summary)
 
         if mode == .claude {
-            let providerView = makeProviderCard()
-            stackView.addArrangedSubview(providerView)
-            providerView.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
+            cliproxyProblem = nil
+            renderClaudeLimits()
+            return
         }
 
         let totalView = TotalLimitCardView(summary: summary, weeklyTitle: weeklyPoolTitle(for: cards))
@@ -1222,7 +1256,7 @@ final class QuotaViewController: NSViewController {
         stackView.addArrangedSubview(totalView)
         totalView.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
 
-        let accounts = AccountsGroupView(cards: displayCards(cards), activeName: mode == .claude ? activeClaudeCard(in: cards)?.card.name : nil)
+        let accounts = AccountsGroupView(cards: displayCards(cards), activeName: nil)
         stackView.addArrangedSubview(accounts)
         accounts.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
         resizeDocument()
@@ -1246,22 +1280,20 @@ final class QuotaViewController: NSViewController {
         setHeaderActionsEnabled(true)
 
         if mode == .claude {
-            let providerView = makeProviderCard()
-            stackView.addArrangedSubview(providerView)
-            providerView.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
-            let cards = displayCards([])
-            if !cards.isEmpty {
-                let accounts = AccountsGroupView(cards: cards, activeName: activeClaudeCard(in: [])?.card.name)
-                stackView.addArrangedSubview(accounts)
-                accounts.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
-            }
+            cliproxyProblem = nil
+            updateStatusItem(cards: [], summary: totalLimitSummary(for: []))
+            renderClaudeLimits()
+            return
         }
 
-        let note = mode == .claude
-            ? L.text("The account pool needs CLIProxyAPI. Claude Desktop's own account shows here once it is read. Add CLIProxy in Settings any time.",
-                     "Hesap havuzu için CLIProxyAPI gerekir. Claude Desktop'ın kendi hesabı okununca burada görünür. CLIProxy'yi istediğin zaman Ayarlar'dan ekleyebilirsin.")
-            : L.text("Codex quota needs CLIProxyAPI; add its URL and management key in Settings. The cost line below works without it.",
-                     "Codex kotası için CLIProxyAPI gerekir; adresini ve management key'ini Ayarlar'dan ekle. Alttaki maliyet satırı onsuz da çalışır.")
+        let note = L.text("Codex quota needs CLIProxyAPI; add its URL and management key in Settings. The cost line below works without it.",
+                          "Codex kotası için CLIProxyAPI gerekir; adresini ve management key'ini Ayarlar'dan ekle. Alttaki maliyet satırı onsuz da çalışır.")
+        stackView.addArrangedSubview(makeInfoBox(note))
+        updateStatusItem(cards: [], summary: totalLimitSummary(for: []))
+        resizeDocument()
+    }
+
+    private func makeInfoBox(_ note: String) -> NSView {
         let box = RoundedView(color: Theme.cardBackground, radius: 10)
         box.translatesAutoresizingMaskIntoConstraints = false
         let icon = NSImageView(image: NSImage(systemSymbolName: "info.circle", accessibilityDescription: nil) ?? NSImage())
@@ -1274,7 +1306,6 @@ final class QuotaViewController: NSViewController {
         label.translatesAutoresizingMaskIntoConstraints = false
         box.addSubview(icon)
         box.addSubview(label)
-        stackView.addArrangedSubview(box)
         NSLayoutConstraint.activate([
             box.widthAnchor.constraint(equalToConstant: currentCardWidth()),
             icon.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 12),
@@ -1286,8 +1317,7 @@ final class QuotaViewController: NSViewController {
             label.topAnchor.constraint(equalTo: box.topAnchor, constant: 12),
             label.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -12)
         ])
-        updateStatusItem(cards: [], summary: totalLimitSummary(for: []))
-        resizeDocument()
+        return box
     }
 
     private func renderError(_ message: String) {
@@ -1298,11 +1328,16 @@ final class QuotaViewController: NSViewController {
 
         // Keep the provider switch reachable when the proxy is down, so Claude can go back to Official.
         if AppConfig.mode() == .claude {
-            let providerView = makeProviderCard()
-            stackView.addArrangedSubview(providerView)
-            providerView.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
+            cliproxyProblem = message
+            renderClaudeLimits()
+            return
         }
 
+        stackView.addArrangedSubview(makeErrorBox(message))
+        resizeDocument()
+    }
+
+    private func makeErrorBox(_ message: String) -> NSView {
         let box = RoundedView(color: Theme.errorBackground, radius: 10)
         box.translatesAutoresizingMaskIntoConstraints = false
 
@@ -1318,7 +1353,6 @@ final class QuotaViewController: NSViewController {
 
         box.addSubview(icon)
         box.addSubview(label)
-        stackView.addArrangedSubview(box)
 
         NSLayoutConstraint.activate([
             box.widthAnchor.constraint(equalToConstant: currentCardWidth()),
@@ -1331,7 +1365,7 @@ final class QuotaViewController: NSViewController {
             label.topAnchor.constraint(equalTo: box.topAnchor, constant: 12),
             label.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -12)
         ])
-        resizeDocument()
+        return box
     }
 
     private func clearCards() {
@@ -1628,7 +1662,11 @@ final class QuotaViewController: NSViewController {
 
 /// All accounts in one grouped surface, separated by hairlines.
 private final class AccountsGroupView: RoundedView {
-    init(cards: [QuotaCard], activeName: String? = nil) {
+    convenience init(cards: [QuotaCard], activeName: String? = nil) {
+        self.init(rows: cards.map { AccountCardView(card: $0, isActive: $0.name == activeName) })
+    }
+
+    init(rows: [NSView]) {
         super.init(color: Theme.cardBackground, radius: 10)
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -1639,7 +1677,7 @@ private final class AccountsGroupView: RoundedView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
-        for (index, card) in cards.enumerated() {
+        for (index, row) in rows.enumerated() {
             if index > 0 {
                 let hairline = NSView()
                 hairline.wantsLayer = true
@@ -1652,7 +1690,6 @@ private final class AccountsGroupView: RoundedView {
                     hairline.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -12)
                 ])
             }
-            let row = AccountCardView(card: card, isActive: card.name == activeName)
             stack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
@@ -1761,6 +1798,111 @@ private final class AccountCardView: NSView {
         formatter.locale = Locale(identifier: L.isTurkish ? "tr_TR" : "en_US_POSIX")
         formatter.dateFormat = L.isTurkish ? "d MMM HH:mm" : "MMM d HH:mm"
         return formatter.string(from: date)
+    }
+}
+
+/// One GrandeClaudex worker: alias and status chip, email, the 5h bar (and weekly when gdc has
+/// it), and when the account was last checked. A worker that is not logged in is dimmed.
+private final class ClaudexWorkerRowView: NSView {
+    init(worker: GrandeClaudexWorker, now: Date) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let name = NSTextField(labelWithString: worker.alias)
+        name.font = .systemFont(ofSize: 12.5, weight: .semibold)
+        name.textColor = Theme.primaryText
+        name.lineBreakMode = .byTruncatingMiddle
+        name.translatesAutoresizingMaskIntoConstraints = false
+        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let chipLabel = worker.loggedIn
+            ? worker.status.flatMap { $0 == "allowed" ? nil : $0.replacingOccurrences(of: "_", with: " ") }
+            : L.text("Not logged in", "Giriş yok")
+        let chip = chipLabel.map { ChipView(text: $0, tint: Theme.accent) }
+
+        let email = NSTextField(labelWithString: worker.email ?? "")
+        email.font = .systemFont(ofSize: 10, weight: .regular)
+        email.textColor = Theme.mutedText
+        email.lineBreakMode = .byTruncatingMiddle
+        email.translatesAutoresizingMaskIntoConstraints = false
+
+        var metrics: [NSView] = []
+        var footerParts: [String] = []
+        if worker.loggedIn {
+            let session = worker.fiveHourWindow(now: now)
+            metrics.append(MetricView(title: L.text("5h", "5 saat"), percent: session?.remainingPercent, resetSeconds: session?.resetSeconds))
+            let weekly = worker.sevenDayWindow(now: now)
+            if let weekly {
+                metrics.append(MetricView(title: L.text("Weekly", "Haftalık"), percent: weekly.remainingPercent, resetSeconds: weekly.resetSeconds))
+            }
+            if session?.hasReset == true || weekly?.hasReset == true {
+                footerParts.append(L.text("reset since", "sonra sıfırlandı"))
+            }
+        }
+        footerParts.insert(checkedText(worker, now: now), at: 0)
+        var footerText = footerParts.joined(separator: " · ")
+        if let error = worker.error { footerText = L.text("Error · \(error)", "Hata · \(error)") }
+        let footer = NSTextField(labelWithString: footerText)
+        footer.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        footer.textColor = worker.error == nil ? Theme.mutedText : NSColor.systemRed
+        footer.lineBreakMode = .byTruncatingTail
+        footer.toolTip = footerText
+        footer.translatesAutoresizingMaskIntoConstraints = false
+
+        [name, email, footer].forEach(addSubview)
+        if let chip { addSubview(chip) }
+        metrics.forEach(addSubview)
+
+        NSLayoutConstraint.activate([
+            name.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            name.topAnchor.constraint(equalTo: topAnchor, constant: 11),
+            email.leadingAnchor.constraint(equalTo: name.leadingAnchor),
+            email.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
+            email.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 1)
+        ])
+        if let chip {
+            NSLayoutConstraint.activate([
+                name.trailingAnchor.constraint(lessThanOrEqualTo: chip.leadingAnchor, constant: -8),
+                chip.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+                chip.centerYAnchor.constraint(equalTo: name.centerYAnchor)
+            ])
+        } else {
+            name.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12).isActive = true
+        }
+
+        var above: NSView = email
+        var gap: CGFloat = 8
+        for metric in metrics {
+            NSLayoutConstraint.activate([
+                metric.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+                metric.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+                metric.topAnchor.constraint(equalTo: above.bottomAnchor, constant: gap)
+            ])
+            above = metric
+            gap = 4
+        }
+        NSLayoutConstraint.activate([
+            footer.leadingAnchor.constraint(equalTo: name.leadingAnchor),
+            footer.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
+            footer.topAnchor.constraint(equalTo: above.bottomAnchor, constant: 6),
+            footer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -11)
+        ])
+        alphaValue = worker.loggedIn ? 1 : 0.5
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    private func checkedText(_ worker: GrandeClaudexWorker, now: Date) -> String {
+        guard let checkedAt = worker.checkedAt else {
+            return worker.loggedIn ? L.text("not checked yet", "henüz kontrol edilmedi") : ""
+        }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.locale = Locale(identifier: L.isTurkish ? "tr_TR" : "en_US")
+        formatter.unitsStyle = .short
+        let ago = formatter.localizedString(for: min(checkedAt, now), relativeTo: now)
+        return L.text("checked \(ago)", "kontrol \(ago)")
     }
 }
 
@@ -2015,6 +2157,73 @@ private final class ModeTabsView: NSView {
         let point = convert(event.locationInWindow, from: nil)
         let index = min(AppMode.allCases.count - 1, max(0, Int(point.x / max(1, bounds.width) * CGFloat(AppMode.allCases.count))))
         onSelect(AppMode.allCases[index])
+    }
+
+    override func mouseDown(with event: NSEvent) {}
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+}
+
+/// Desktop / CLIProxy / GrandeClaudex pill tabs above the Claude limit list.
+private final class LimitTabsView: NSView {
+    private let onSelect: (ClaudeLimitsTab) -> Void
+
+    init(selected: ClaudeLimitsTab, onSelect: @escaping (ClaudeLimitsTab) -> Void) {
+        self.onSelect = onSelect
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = Theme.progressTrack.cgColor
+        layer?.cornerRadius = 8
+        layer?.cornerCurve = .continuous
+
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.distribution = .fillEqually
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        for tab in ClaudeLimitsTab.allCases {
+            let isSelected = tab == selected
+            let segment = RoundedView(color: isSelected ? Theme.segmentThumb : .clear, radius: 6)
+            if isSelected {
+                segment.layer?.shadowColor = NSColor.black.cgColor
+                segment.layer?.shadowOpacity = Theme.isDark ? 0.3 : 0.12
+                segment.layer?.shadowRadius = 1.5
+                segment.layer?.shadowOffset = NSSize(width: 0, height: -0.5)
+            }
+            let label = NSTextField(labelWithString: tab.title)
+            label.font = .systemFont(ofSize: 11, weight: isSelected ? .semibold : .regular)
+            label.textColor = isSelected ? Theme.primaryText : Theme.secondaryText
+            label.translatesAutoresizingMaskIntoConstraints = false
+            segment.addSubview(label)
+            NSLayoutConstraint.activate([
+                label.centerXAnchor.constraint(equalTo: segment.centerXAnchor),
+                label.centerYAnchor.constraint(equalTo: segment.centerYAnchor)
+            ])
+            stack.addArrangedSubview(segment)
+            segment.heightAnchor.constraint(equalTo: stack.heightAnchor).isActive = true
+        }
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2)
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let tabs = ClaudeLimitsTab.allCases
+        let point = convert(event.locationInWindow, from: nil)
+        let index = min(tabs.count - 1, max(0, Int(point.x / max(1, bounds.width) * CGFloat(tabs.count))))
+        onSelect(tabs[index])
     }
 
     override func mouseDown(with event: NSEvent) {}
@@ -2324,6 +2533,12 @@ private enum LocalCodexUsage {
             for name in children.sorted() {
                 add((root as NSString).appendingPathComponent(name))
             }
+        }
+
+        // GrandeClaudex Codex workers: only their transcripts are counted, never their auth files.
+        let workerRoot = "\(userHome)/.codex-workers"
+        for name in ((try? fm.contentsOfDirectory(atPath: workerRoot)) ?? []).sorted() {
+            add("\(workerRoot)/\(name)/codex")
         }
 
         // cli-profiles.json may list extra codex_home paths
@@ -4397,13 +4612,19 @@ extension QuotaViewController {
     private func displayCards(_ cards: [QuotaCard]) -> [QuotaCard] {
         let sorted = cards.sorted(by: sortCards)
         guard AppConfig.mode() == .claude else { return sorted }
+        return desktopCards(cards) + sorted
+    }
+
+    /// The Desktop tab: Desktop's own account (live) and the other saved Desktop accounts
+    /// (last known values) that CLIProxy lacks.
+    private func desktopCards(_ cards: [QuotaCard]) -> [QuotaCard] {
         let live = currentDesktopCard
         let liveUUID = live == nil ? nil : desktopCard?.uuid
         let cached = ClaudeProviderSwitcher.desktopAccounts.accounts()
             .filter { $0.accountUUID != liveUUID }
             .compactMap { account in cachedDesktopCard(for: account) }
             .filter { !reportsQuota(cards, for: $0.name) && $0.name.lowercased() != live?.name.lowercased() }
-        return [live].compactMap { $0 } + cached + sorted
+        return [live].compactMap { $0 } + cached
     }
 
     private func cachedDesktopCard(for account: DesktopAccount) -> QuotaCard? {
@@ -4456,22 +4677,170 @@ extension QuotaViewController {
         let withoutProxy = !AppConfig.hasManagementKey(for: .claude)
         guard AppConfig.mode() == .claude, !latestCards.isEmpty || withoutProxy else { return }
         updateStatusItem(cards: latestCards, summary: totalLimitSummary(for: latestCards))
-        let existing = stackView.arrangedSubviews.firstIndex(where: { $0 is AccountsGroupView })
-        // With CLIProxy, a missing list means the error screen is up; leave it.
-        guard existing != nil || withoutProxy else { return }
-        if let existing {
-            let old = stackView.arrangedSubviews[existing]
-            stackView.removeArrangedSubview(old)
-            old.removeFromSuperview()
+        rebuildClaudeTabContent()
+    }
+
+    /// Claude mode's list: the provider card, the three limit tabs and the selected tab's content.
+    private func renderClaudeLimits() {
+        clearCards()
+        let provider = makeProviderCard()
+        stackView.addArrangedSubview(provider)
+        provider.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
+
+        let tabs = LimitTabsView(selected: AppConfig.claudeTab()) { [weak self] tab in
+            self?.selectClaudeTab(tab)
         }
-        let cards = displayCards(latestCards)
-        guard !cards.isEmpty else { return }
-        let accounts = AccountsGroupView(cards: cards, activeName: activeClaudeCard(in: latestCards)?.card.name)
-        // Without CLIProxy the list goes right under the provider card.
-        let providerIndex = stackView.arrangedSubviews.firstIndex(where: { $0 is ProviderSwitchCardView }).map { $0 + 1 }
-        stackView.insertArrangedSubview(accounts, at: existing ?? providerIndex ?? 0)
-        accounts.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
+        tabs.translatesAutoresizingMaskIntoConstraints = false
+        stackView.addArrangedSubview(tabs)
+        NSLayoutConstraint.activate([
+            tabs.widthAnchor.constraint(equalToConstant: currentCardWidth()),
+            tabs.heightAnchor.constraint(equalToConstant: UI.modeRowHeight)
+        ])
+        addClaudeTabContent()
         resizeDocument()
+    }
+
+    private func addClaudeTabContent() {
+        for view in claudeTabContent() {
+            stackView.addArrangedSubview(view)
+            view.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
+        }
+    }
+
+    /// Swaps only what sits under the tabs, so the provider card and the tab row stay as they are.
+    private func rebuildClaudeTabContent() {
+        let views = stackView.arrangedSubviews
+        guard let tabs = views.firstIndex(where: { $0 is LimitTabsView }) else { return }
+        views[(tabs + 1)...].forEach {
+            stackView.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+        addClaudeTabContent()
+        resizeDocument()
+    }
+
+    private func claudeTabContent() -> [NSView] {
+        switch AppConfig.claudeTab() {
+        case .desktop:
+            let cards = desktopCards(latestCards)
+            guard !cards.isEmpty else {
+                return [makeInfoBox(L.text(
+                    "Claude Desktop's own account shows here once it is read, and the saved Desktop accounts keep their last known values. An account CLIProxy reports is listed in the CLIProxy tab.",
+                    "Claude Desktop'ın kendi hesabı okununca burada görünür; kayıtlı Desktop hesapları son bilinen değerleriyle kalır. CLIProxy'nin bildirdiği hesap CLIProxy sekmesinde listelenir."
+                ))]
+            }
+            return [AccountsGroupView(cards: cards, activeName: activeClaudeCard(in: latestCards)?.card.name)]
+        case .cliproxy:
+            if let cliproxyProblem { return [makeErrorBox(cliproxyProblem)] }
+            guard !latestCards.isEmpty else {
+                return [makeInfoBox(L.text(
+                    "The account pool needs CLIProxyAPI. Add CLIProxy in Settings any time.",
+                    "Hesap havuzu için CLIProxyAPI gerekir. CLIProxy'yi istediğin zaman Ayarlar'dan ekleyebilirsin."
+                ))]
+            }
+            let total = TotalLimitCardView(summary: totalLimitSummary(for: latestCards), weeklyTitle: weeklyPoolTitle(for: latestCards))
+            total.translatesAutoresizingMaskIntoConstraints = false
+            return [total, AccountsGroupView(cards: latestCards.sorted(by: sortCards), activeName: activeClaudeCard(in: latestCards)?.card.name)]
+        case .grandeClaudex:
+            return grandeClaudexContent()
+        }
+    }
+
+    private func selectClaudeTab(_ tab: ClaudeLimitsTab) {
+        guard tab != AppConfig.claudeTab() else { return }
+        AppConfig.setClaudeTab(tab)
+        renderClaudeLimits()
+        refreshGrandeClaudex()
+    }
+
+    /// Reads gdc's cache, which is quick and free; only the refresh button probes the accounts.
+    private func refreshGrandeClaudex() {
+        guard AppConfig.mode() == .claude, AppConfig.claudeTab() == .grandeClaudex,
+              !grandeClaudexReading, !grandeClaudexProbing else { return }
+        grandeClaudexReading = true
+        DispatchQueue.global(qos: .utility).async {
+            let result = GrandeClaudexCLI.fetch(probe: false)
+            DispatchQueue.main.async {
+                self.grandeClaudexReading = false
+                self.applyGrandeClaudex(result)
+            }
+        }
+    }
+
+    /// Makes one tiny haiku call per account, so it runs only when the button is pressed.
+    @objc private func probeGrandeClaudex() {
+        guard !grandeClaudexProbing else { return }
+        grandeClaudexProbing = true
+        rebuildClaudeTabContent()
+        DispatchQueue.global(qos: .utility).async {
+            let result = GrandeClaudexCLI.fetch(probe: true)
+            DispatchQueue.main.async {
+                self.grandeClaudexProbing = false
+                self.applyGrandeClaudex(result)
+            }
+        }
+    }
+
+    private func applyGrandeClaudex(_ result: Result<GrandeClaudexSnapshot, GrandeClaudexCLI.Failure>) {
+        switch result {
+        case .success(let snapshot):
+            grandeClaudex = snapshot
+            grandeClaudexProblem = nil
+        case .failure(let failure):
+            switch failure {
+            case .notInstalled:
+                grandeClaudexProblem = L.text("gdc was not found at ~/.local/bin/gdc", "gdc ~/.local/bin/gdc içinde bulunamadı")
+            case .failed(let message):
+                grandeClaudexProblem = L.text("gdc failed · \(message)", "gdc hata verdi · \(message)")
+            case .unreadable:
+                grandeClaudexProblem = L.text("gdc returned data GrandeBar cannot read", "gdc'nin verdiği veri okunamadı")
+            }
+        }
+        guard AppConfig.mode() == .claude, AppConfig.claudeTab() == .grandeClaudex else { return }
+        rebuildClaudeTabContent()
+    }
+
+    private func grandeClaudexContent() -> [NSView] {
+        let header = NSView()
+        header.translatesAutoresizingMaskIntoConstraints = false
+        let status: String
+        if grandeClaudexProbing {
+            status = L.text("Probing accounts…", "Hesaplar yoklanıyor…")
+        } else if let problem = grandeClaudexProblem {
+            status = problem
+        } else if let snapshot = grandeClaudex {
+            status = L.text("\(snapshot.workers.count) accounts · read from gdc cache", "\(snapshot.workers.count) hesap · gdc önbelleğinden")
+        } else {
+            status = L.text("Reading GrandeClaudex…", "GrandeClaudex okunuyor…")
+        }
+        let label = NSTextField(labelWithString: status)
+        label.font = .systemFont(ofSize: 10.5, weight: .regular)
+        label.textColor = grandeClaudexProblem != nil && !grandeClaudexProbing ? NSColor.systemRed : Theme.secondaryText
+        label.lineBreakMode = .byTruncatingTail
+        label.toolTip = status
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let probe = iconButton("arrow.clockwise", action: #selector(probeGrandeClaudex))
+        probe.toolTip = L.text("Probe every account now (one tiny haiku call each)", "Tüm hesapları şimdi yokla (her biri için küçük bir haiku çağrısı)")
+        probe.isEnabled = !grandeClaudexProbing
+        header.addSubview(label)
+        header.addSubview(probe)
+        NSLayoutConstraint.activate([
+            header.heightAnchor.constraint(equalToConstant: 24),
+            label.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 4),
+            label.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: probe.leadingAnchor, constant: -6),
+            probe.trailingAnchor.constraint(equalTo: header.trailingAnchor),
+            probe.centerYAnchor.constraint(equalTo: header.centerYAnchor)
+        ])
+
+        guard let snapshot = grandeClaudex else { return [header] }
+        guard !snapshot.workers.isEmpty else {
+            return [header, makeInfoBox(L.text("GrandeClaudex reports no Claude workers.", "GrandeClaudex Claude worker bildirmiyor."))]
+        }
+        let now = Date()
+        let rows = snapshot.workers.map { ClaudexWorkerRowView(worker: $0, now: now) }
+        return [header, AccountsGroupView(rows: rows)]
     }
 
     private func finishProviderAction(_ failure: Error?) {

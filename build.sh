@@ -20,6 +20,7 @@ swiftc \
   "$ROOT/Sources/ClaudeDesktopAccounts.swift" \
   "$ROOT/Sources/ClaudeSessionSharing.swift" \
   "$ROOT/Sources/ClaudeDesktopToken.swift" \
+  "$ROOT/Sources/GrandeClaudex.swift" \
   "$ROOT/Sources/GrandeBarUpdater.swift" \
   "$ROOT/Sources/main.swift" \
   -framework AppKit \
