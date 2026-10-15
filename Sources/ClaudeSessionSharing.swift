@@ -16,11 +16,11 @@ import Foundation
 //
 // Desktop reads its session folder only when it starts or changes account, and later saves its
 // in-memory copies over whatever was written there. So the folders of the signed-in account are
-// only read while Desktop may run, and written while it is closed for a switch. That is also
-// what tells an archive action from a stale save: Desktop never has an older isArchived in
-// memory than its own folder holds. Desktop keeps no archive time, so an action is dated by the
-// mtime of the write that carries it; the ledger remembers the latest one per session and what
-// each folder held.
+// only read while Desktop runs, and written once it is closed, by a switch or otherwise. That
+// is also what tells an archive action from a stale save: Desktop never has an older isArchived
+// in memory than its own folder holds. Desktop keeps no archive time, so an action is dated by
+// the mtime of the write that carries it; the ledger remembers the latest one per session and
+// what each folder held.
 
 final class ClaudeSessionSharing {
     static let enabledKey = "shareClaudeCodeSessions"
@@ -65,12 +65,15 @@ final class ClaudeSessionSharing {
     private static let interval: TimeInterval = 10
 
     private let home: URL
+    /// Whether the Claude Desktop process is up; unknown counts as running.
+    private let isDesktopRunning: () -> Bool
     private let fm = FileManager.default
     private let lock = NSLock()
     private var timer: DispatchSourceTimer?
 
-    init(home: String) {
+    init(home: String, isDesktopRunning: @escaping () -> Bool = { true }) {
         self.home = URL(fileURLWithPath: home)
+        self.isDesktopRunning = isDesktopRunning
     }
 
     private var defaultDataDir: URL { home.appendingPathComponent("Library/Application Support/Claude") }
@@ -92,9 +95,10 @@ final class ClaudeSessionSharing {
     }
 
     /// One pass over every account and org folder. Safe while Desktop runs; serialized.
-    /// `desktopClosed` is only for callers that saw Desktop exit: nothing can be mid-write then,
-    /// so even the files Desktop flushed as it quit are copied, and the signed-in account's
-    /// folders are brought up to date before Desktop loads one of them.
+    /// `desktopClosed` is only for callers that saw Desktop exit, including its helpers: nothing
+    /// can be mid-write then, so even the files Desktop flushed as it quit are copied, and the
+    /// signed-in account's folders are brought up to date before Desktop loads one of them. A
+    /// pass that finds the Desktop process gone does the same.
     @discardableResult
     func sync(desktopClosed: Bool = false) -> Result {
         lock.lock()
@@ -110,9 +114,11 @@ final class ClaudeSessionSharing {
         let unknown = Set(all.filter { listing[$0] == nil }.map(folderKey))
         guard dirs.count >= 2 else { return result }
         let now = Self.nowNanoseconds()
-        let settle = desktopClosed ? 0 : Self.settleNanoseconds
+        // Desktop not running counts as closed, whoever quit it; it is asked again before writing.
+        let closed = desktopClosed || !isDesktopRunning()
+        let settle = closed ? 0 : Self.settleNanoseconds
         func settled(_ mtime: Int64) -> Bool { now - mtime >= settle }
-        var loaded = desktopClosed ? [] : signedInFolders(dirs)
+        var loaded = closed ? [] : signedInFolders(dirs)
         var ledger = loadLedger()
         var saved = ledger
         func persist() {
@@ -200,7 +206,8 @@ final class ClaudeSessionSharing {
         // 3) Sessions: the newest settled copy wins and carries the latest archive state; JSON is
         //    read only before writing. Desktop saves its in-memory copies over whatever lands in a
         //    folder it has loaded, so the signed-in account's folders wait until it is closed.
-        if !desktopClosed { loaded.formUnion(signedInFolders(dirs)) }
+        // Read again in case Desktop signed in elsewhere or started since the pass began.
+        if !desktopClosed, !closed || isDesktopRunning() { loaded.formUnion(signedInFolders(dirs)) }
         func newest(_ name: String, in candidates: [URL]) -> (mtime: Int64, url: URL)? {
             var best: (mtime: Int64, url: URL)?
             for dir in candidates {

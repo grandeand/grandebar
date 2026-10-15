@@ -4020,7 +4020,7 @@ private enum ClaudeProviderSwitcher {
     /// Sandboxed dry runs never quit or launch the real app.
     static let desktopApp: DesktopAppControl = sandboxHome == nil ? ClaudeDesktopApp() : DetachedDesktopApp()
     static let desktopAccounts = ClaudeDesktopAccounts(home: home, app: desktopApp)
-    static let sessionSharing = ClaudeSessionSharing(home: home)
+    static let sessionSharing = ClaudeSessionSharing(home: home, isDesktopRunning: { desktopApp.isRunning })
 
     /// The claude.ai account in use: Desktop's live login while Desktop is on claude.ai, else
     /// Claude Code's own login while Code is. Nil when Claude runs through CLIProxy.

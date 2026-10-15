@@ -48,10 +48,13 @@ final class FakeDesktop: DesktopAppControl {
 }
 
 let arguments = CommandLine.arguments
-let sharing = ClaudeSessionSharing(home: arguments[2])
+// "running": a background pass with Desktop up; "quit": one after Desktop was quit some other
+// way; "closed": the sync GrandeBar runs once it has seen Desktop exit.
+let mode = arguments.count > 3 ? arguments[3] : "running"
+let sharing = ClaudeSessionSharing(home: arguments[2], isDesktopRunning: { mode == "running" })
 switch arguments[1] {
 case "sync":
-    emit(sharing.sync(desktopClosed: arguments[3] == "closed"))
+    emit(sharing.sync(desktopClosed: mode == "closed"))
 case "switch":
     // GrandeBar's switch: quit Desktop, restore the account, sync while closed, relaunch.
     let desktop = FakeDesktop(home: arguments[2])
@@ -162,11 +165,9 @@ class Sandbox(unittest.TestCase):
     def ledger(self):
         return self.support / "GrandeBar" / "ClaudeSessionArchive.json"
 
-    def sync(self, closed=False):
-        result = subprocess.run(
-            [str(BINARY), "sync", str(self.home), "closed" if closed else "running"],
-            check=True, capture_output=True, text=True,
-        )
+    def sync(self, closed=False, running=True):
+        mode = "closed" if closed else ("running" if running else "quit")
+        result = subprocess.run([str(BINARY), "sync", str(self.home), mode], check=True, capture_output=True, text=True)
         return json.loads(result.stdout)
 
 
@@ -451,6 +452,27 @@ class ArchiveTests(Sandbox):
         self.assertEqual(self.read(self.c, sid)["title"], "Newer on B")
         self.sync(closed=True)
         self.assertEqual(self.read(self.a, sid)["title"], "Newer on B")
+
+    def test_a_quit_outside_grandebar_lets_the_signed_in_account_catch_up(self):
+        self.signed_in(ACCOUNT_A)
+        sid = self.shared()
+        self.write(self.b, sid, age=100, isArchived=True)
+        for _ in range(3):
+            self.sync()
+        self.assertEqual(self.archived(sid, *self.folders), [False, True, True])
+        added = str(uuid.uuid4())
+        self.write(self.b, added, age=50, title="New on B")
+        self.sync()
+        self.assertIsNone(self.read(self.a, added))
+        # Desktop quit by hand or by its updater: it still names A as signed in, but no process
+        # runs, so the next background pass catches A up before Desktop opens again.
+        self.sync(running=False)
+        self.assertEqual(self.archived(sid, *self.folders), [True, True, True])
+        self.assertEqual(self.read(self.a, added)["title"], "New on B")
+        # Once Desktop runs again, A is left alone until the next time it is closed.
+        self.write(self.b, added, age=10, title="Renamed on B")
+        self.sync()
+        self.assertEqual(self.read(self.a, added)["title"], "New on B")
 
     def test_a_failed_write_is_tried_again(self):
         self.signed_in(ACCOUNT_A)
