@@ -17,14 +17,14 @@ private enum AppMode: String, CaseIterable {
 /// Claude mode's limit list is split by where the accounts come from.
 private enum ClaudeLimitsTab: String, CaseIterable {
     case desktop
+    case claudex
     case cliproxy
-    case grandeClaudex
 
     var title: String {
         switch self {
         case .desktop: return "Desktop"
+        case .claudex: return "Claudex"
         case .cliproxy: return "CLIProxy"
-        case .grandeClaudex: return "GrandeClaudex"
         }
     }
 }
@@ -32,6 +32,8 @@ private enum ClaudeLimitsTab: String, CaseIterable {
 private enum AppConfig {
     static let modeKey = "appMode"
     static let claudeTabKey = "claudeLimitsTab"
+    /// Refreshes probe the GrandeClaudex workers (Claude Code's `/usage`, no model call) at most this often.
+    static let claudexProbeInterval: TimeInterval = 5 * 60
     static let startModeKey = "startMode"
     static let startModeOptions = ["last", "codex", "claude"]
     static let defaultAPIBase = "http://localhost:8317"
@@ -523,11 +525,16 @@ final class QuotaViewController: NSViewController {
     private var latestUsage: LocalUsage?
     /// What the CLIProxy tab shows when it has no pool to list.
     private var cliproxyProblem: String?
-    /// GrandeClaudex workers: the cache is read on every refresh, probing is a button.
-    private var grandeClaudex: GrandeClaudexSnapshot?
-    private var grandeClaudexProblem: String?
-    private var grandeClaudexReading = false
-    private var grandeClaudexProbing = false
+    /// GrandeClaudex's Claude workers, read through gdc; outside the pool totals and the menu bar.
+    private var claudex: GrandeClaudexSnapshot?
+    private var claudexProblem: String?
+    private var claudexInFlight = false
+    private var claudexProbing = false
+    /// The tab's button was pressed while a cache read ran; it probes once that read is back.
+    private var claudexProbeQueued = false
+    private var lastClaudexProbeAt: Date?
+    private weak var claudexStatusLabel: NSTextField?
+    private weak var claudexProbeButton: NSButton?
 
     init(statusUpdate: @escaping (String, String) -> Void) {
         self.statusUpdate = statusUpdate
@@ -689,6 +696,12 @@ final class QuotaViewController: NSViewController {
         updateLastRefreshLabel()
     }
 
+    override func viewWillAppear() {
+        super.viewWillAppear()
+        // Stored reads show "last read" times and reset countdowns relative to now.
+        rebuildClaudeTabContent()
+    }
+
     private func updateSubtitle() {
         subtitleLabel.stringValue = ([subtitleBase] + [subtitleDetail].compactMap { $0 }).joined(separator: " · ")
     }
@@ -704,11 +717,11 @@ final class QuotaViewController: NSViewController {
         if showSettingsIfNeeded(refreshAfterSave: true) {
             return
         }
+        refreshClaudex()
         guard AppConfig.hasManagementKey() else {
             renderWithoutProxy()
             refreshLocalUsage()
             refreshDesktopUsage()
-            refreshGrandeClaudex()
             return
         }
         isRefreshing = true
@@ -740,7 +753,6 @@ final class QuotaViewController: NSViewController {
                     self.renderError(error.localizedDescription)
                 }
                 self.refreshDesktopUsage()
-                self.refreshGrandeClaudex()
             }
         }
     }
@@ -1662,11 +1674,7 @@ final class QuotaViewController: NSViewController {
 
 /// All accounts in one grouped surface, separated by hairlines.
 private final class AccountsGroupView: RoundedView {
-    convenience init(cards: [QuotaCard], activeName: String? = nil) {
-        self.init(rows: cards.map { AccountCardView(card: $0, isActive: $0.name == activeName) })
-    }
-
-    init(rows: [NSView]) {
+    init(cards: [QuotaCard], activeName: String? = nil) {
         super.init(color: Theme.cardBackground, radius: 10)
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -1677,7 +1685,7 @@ private final class AccountsGroupView: RoundedView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
-        for (index, row) in rows.enumerated() {
+        for (index, card) in cards.enumerated() {
             if index > 0 {
                 let hairline = NSView()
                 hairline.wantsLayer = true
@@ -1690,6 +1698,7 @@ private final class AccountsGroupView: RoundedView {
                     hairline.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -12)
                 ])
             }
+            let row = AccountCardView(card: card, isActive: card.name == activeName)
             stack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
@@ -1740,6 +1749,7 @@ private final class AccountCardView: NSView {
         footer.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
         footer.textColor = Theme.mutedText
         footer.lineBreakMode = .byTruncatingTail
+        footer.toolTip = card.note
         footer.translatesAutoresizingMaskIntoConstraints = false
 
         [name, chip, session, weekly, footer].forEach(addSubview)
@@ -1798,111 +1808,6 @@ private final class AccountCardView: NSView {
         formatter.locale = Locale(identifier: L.isTurkish ? "tr_TR" : "en_US_POSIX")
         formatter.dateFormat = L.isTurkish ? "d MMM HH:mm" : "MMM d HH:mm"
         return formatter.string(from: date)
-    }
-}
-
-/// One GrandeClaudex worker: alias and status chip, email, the 5h bar (and weekly when gdc has
-/// it), and when the account was last checked. A worker that is not logged in is dimmed.
-private final class ClaudexWorkerRowView: NSView {
-    init(worker: GrandeClaudexWorker, now: Date) {
-        super.init(frame: .zero)
-        translatesAutoresizingMaskIntoConstraints = false
-
-        let name = NSTextField(labelWithString: worker.alias)
-        name.font = .systemFont(ofSize: 12.5, weight: .semibold)
-        name.textColor = Theme.primaryText
-        name.lineBreakMode = .byTruncatingMiddle
-        name.translatesAutoresizingMaskIntoConstraints = false
-        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        let chipLabel = worker.loggedIn
-            ? worker.status.flatMap { $0 == "allowed" ? nil : $0.replacingOccurrences(of: "_", with: " ") }
-            : L.text("Not logged in", "Giriş yok")
-        let chip = chipLabel.map { ChipView(text: $0, tint: Theme.accent) }
-
-        let email = NSTextField(labelWithString: worker.email ?? "")
-        email.font = .systemFont(ofSize: 10, weight: .regular)
-        email.textColor = Theme.mutedText
-        email.lineBreakMode = .byTruncatingMiddle
-        email.translatesAutoresizingMaskIntoConstraints = false
-
-        var metrics: [NSView] = []
-        var footerParts: [String] = []
-        if worker.loggedIn {
-            let session = worker.fiveHourWindow(now: now)
-            metrics.append(MetricView(title: L.text("5h", "5 saat"), percent: session?.remainingPercent, resetSeconds: session?.resetSeconds))
-            let weekly = worker.sevenDayWindow(now: now)
-            if let weekly {
-                metrics.append(MetricView(title: L.text("Weekly", "Haftalık"), percent: weekly.remainingPercent, resetSeconds: weekly.resetSeconds))
-            }
-            if session?.hasReset == true || weekly?.hasReset == true {
-                footerParts.append(L.text("reset since", "sonra sıfırlandı"))
-            }
-        }
-        footerParts.insert(checkedText(worker, now: now), at: 0)
-        var footerText = footerParts.joined(separator: " · ")
-        if let error = worker.error { footerText = L.text("Error · \(error)", "Hata · \(error)") }
-        let footer = NSTextField(labelWithString: footerText)
-        footer.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
-        footer.textColor = worker.error == nil ? Theme.mutedText : NSColor.systemRed
-        footer.lineBreakMode = .byTruncatingTail
-        footer.toolTip = footerText
-        footer.translatesAutoresizingMaskIntoConstraints = false
-
-        [name, email, footer].forEach(addSubview)
-        if let chip { addSubview(chip) }
-        metrics.forEach(addSubview)
-
-        NSLayoutConstraint.activate([
-            name.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            name.topAnchor.constraint(equalTo: topAnchor, constant: 11),
-            email.leadingAnchor.constraint(equalTo: name.leadingAnchor),
-            email.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
-            email.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 1)
-        ])
-        if let chip {
-            NSLayoutConstraint.activate([
-                name.trailingAnchor.constraint(lessThanOrEqualTo: chip.leadingAnchor, constant: -8),
-                chip.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-                chip.centerYAnchor.constraint(equalTo: name.centerYAnchor)
-            ])
-        } else {
-            name.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12).isActive = true
-        }
-
-        var above: NSView = email
-        var gap: CGFloat = 8
-        for metric in metrics {
-            NSLayoutConstraint.activate([
-                metric.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-                metric.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-                metric.topAnchor.constraint(equalTo: above.bottomAnchor, constant: gap)
-            ])
-            above = metric
-            gap = 4
-        }
-        NSLayoutConstraint.activate([
-            footer.leadingAnchor.constraint(equalTo: name.leadingAnchor),
-            footer.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
-            footer.topAnchor.constraint(equalTo: above.bottomAnchor, constant: 6),
-            footer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -11)
-        ])
-        alphaValue = worker.loggedIn ? 1 : 0.5
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    private func checkedText(_ worker: GrandeClaudexWorker, now: Date) -> String {
-        guard let checkedAt = worker.checkedAt else {
-            return worker.loggedIn ? L.text("not checked yet", "henüz kontrol edilmedi") : ""
-        }
-        let formatter = RelativeDateTimeFormatter()
-        formatter.locale = Locale(identifier: L.isTurkish ? "tr_TR" : "en_US")
-        formatter.unitsStyle = .short
-        let ago = formatter.localizedString(for: min(checkedAt, now), relativeTo: now)
-        return L.text("checked \(ago)", "kontrol \(ago)")
     }
 }
 
@@ -2166,7 +2071,7 @@ private final class ModeTabsView: NSView {
     }
 }
 
-/// Desktop / CLIProxy / GrandeClaudex pill tabs above the Claude limit list.
+/// Desktop / Claudex / CLIProxy pill tabs above the Claude limit list.
 private final class LimitTabsView: NSView {
     private let onSelect: (ClaudeLimitsTab) -> Void
 
@@ -4612,30 +4517,56 @@ extension QuotaViewController {
     private func displayCards(_ cards: [QuotaCard]) -> [QuotaCard] {
         let sorted = cards.sorted(by: sortCards)
         guard AppConfig.mode() == .claude else { return sorted }
-        return desktopCards(cards) + sorted
+        return desktopCards(cards).filter { !reportsQuota(cards, for: $0.name) } + sorted
     }
 
-    /// The Desktop tab: Desktop's own account (live) and the other saved Desktop accounts
-    /// (last known values) that CLIProxy lacks.
+    /// The Desktop tab: the account Desktop is signed into and the other saved Desktop accounts.
+    /// Those CLIProxy lacks show Desktop's own read (live) or their last known values; those it
+    /// reports show its values, as GrandeBar does not read them with Desktop's login.
     private func desktopCards(_ cards: [QuotaCard]) -> [QuotaCard] {
-        let live = currentDesktopCard
-        let liveUUID = live == nil ? nil : desktopCard?.uuid
-        let cached = ClaudeProviderSwitcher.desktopAccounts.accounts()
-            .filter { $0.accountUUID != liveUUID }
-            .compactMap { account in cachedDesktopCard(for: account) }
-            .filter { !reportsQuota(cards, for: $0.name) && $0.name.lowercased() != live?.name.lowercased() }
-        return [live].compactMap { $0 } + cached
+        let accounts = ClaudeProviderSwitcher.desktopAccounts
+        var live: (uuid: String, card: QuotaCard)?
+        if let card = currentDesktopCard, let uuid = desktopCard?.uuid {
+            live = (uuid, card)
+        } else if ClaudeProviderSwitcher.desktopMode() == .official, accounts.liveIsSignedIn(),
+                  let uuid = accounts.liveAccountUUID(), let card = proxyCard(in: cards, for: accounts.email(for: uuid)) {
+            live = (uuid, card)
+        }
+        let others = accounts.accounts()
+            .filter { $0.accountUUID != live?.uuid }
+            .compactMap { account -> QuotaCard? in
+                let cached = cachedDesktopCard(for: account)
+                return proxyCard(in: cards, for: account.email ?? cached?.name) ?? cached
+            }
+            .filter { $0.name.lowercased() != live?.card.name.lowercased() }
+        return [live?.card].compactMap { $0 } + others
+    }
+
+    private func proxyCard(in cards: [QuotaCard], for email: String?) -> QuotaCard? {
+        guard let email, reportsQuota(cards, for: email) else { return nil }
+        return cards.first { $0.name.lowercased() == email.lowercased() }
     }
 
     private func cachedDesktopCard(for account: DesktopAccount) -> QuotaCard? {
         DesktopUsageCache.card(for: account.accountUUID) { fetchedAt, resetSince in
+            self.lastReadNote(account.alias, at: fetchedAt, resetSince: resetSince)
+        }
+    }
+
+    /// "<alias> · last read 5 min. ago", the footer of a card that shows a stored read.
+    private func lastReadNote(_ alias: String, at date: Date, resetSince: Bool) -> String {
+        let now = Date()
+        let ago: String
+        if now.timeIntervalSince(date) < 60 {
+            ago = L.text("just now", "az önce")
+        } else {
             let formatter = RelativeDateTimeFormatter()
             formatter.locale = Locale(identifier: L.isTurkish ? "tr_TR" : "en_US")
             formatter.unitsStyle = .short
-            let ago = formatter.localizedString(for: fetchedAt, relativeTo: Date())
-            let base = L.text("\(account.alias) · last read \(ago)", "\(account.alias) · son okuma \(ago)")
-            return resetSince ? base + L.text(" · reset since", " · sonra sıfırlandı") : base
+            ago = formatter.localizedString(for: date, relativeTo: now)
         }
+        let base = L.text("\(alias) · last read \(ago)", "\(alias) · son okuma \(ago)")
+        return resetSince ? base + L.text(" · reset since", " · sonra sıfırlandı") : base
     }
 
     private func reportsQuota(_ cards: [QuotaCard], for email: String) -> Bool {
@@ -4674,19 +4605,25 @@ extension QuotaViewController {
 
     /// After a route or account change: the status item and the active-row mark follow it.
     private func refreshActiveAccount() {
-        let withoutProxy = !AppConfig.hasManagementKey(for: .claude)
-        guard AppConfig.mode() == .claude, !latestCards.isEmpty || withoutProxy else { return }
-        updateStatusItem(cards: latestCards, summary: totalLimitSummary(for: latestCards))
+        guard AppConfig.mode() == .claude else { return }
+        if !latestCards.isEmpty || !AppConfig.hasManagementKey(for: .claude) {
+            updateStatusItem(cards: latestCards, summary: totalLimitSummary(for: latestCards))
+        }
+        // The tabs stay up when CLIProxy fails, and the Desktop tab does not depend on it.
         rebuildClaudeTabContent()
     }
 
-    /// Claude mode's list: the provider card, the three limit tabs and the selected tab's content.
+    /// Claude mode's list: the provider card, the limit tabs and the selected tab's content.
     private func renderClaudeLimits() {
         clearCards()
         let provider = makeProviderCard()
         stackView.addArrangedSubview(provider)
         provider.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
+        addClaudeTabs()
+        resizeDocument()
+    }
 
+    private func addClaudeTabs() {
         let tabs = LimitTabsView(selected: AppConfig.claudeTab()) { [weak self] tab in
             self?.selectClaudeTab(tab)
         }
@@ -4697,7 +4634,6 @@ extension QuotaViewController {
             tabs.heightAnchor.constraint(equalToConstant: UI.modeRowHeight)
         ])
         addClaudeTabContent()
-        resizeDocument()
     }
 
     private func addClaudeTabContent() {
@@ -4707,15 +4643,20 @@ extension QuotaViewController {
         }
     }
 
-    /// Swaps only what sits under the tabs, so the provider card and the tab row stay as they are.
-    private func rebuildClaudeTabContent() {
+    /// Swaps what sits under the provider card (the tab row too when the selection changed), so
+    /// the provider card stays as it is.
+    private func rebuildClaudeTabContent(withTabs: Bool = false) {
         let views = stackView.arrangedSubviews
         guard let tabs = views.firstIndex(where: { $0 is LimitTabsView }) else { return }
-        views[(tabs + 1)...].forEach {
+        views[(withTabs ? tabs : tabs + 1)...].forEach {
             stackView.removeArrangedSubview($0)
             $0.removeFromSuperview()
         }
-        addClaudeTabContent()
+        if withTabs {
+            addClaudeTabs()
+        } else {
+            addClaudeTabContent()
+        }
         resizeDocument()
     }
 
@@ -4725,11 +4666,13 @@ extension QuotaViewController {
             let cards = desktopCards(latestCards)
             guard !cards.isEmpty else {
                 return [makeInfoBox(L.text(
-                    "Claude Desktop's own account shows here once it is read, and the saved Desktop accounts keep their last known values. An account CLIProxy reports is listed in the CLIProxy tab.",
-                    "Claude Desktop'ın kendi hesabı okununca burada görünür; kayıtlı Desktop hesapları son bilinen değerleriyle kalır. CLIProxy'nin bildirdiği hesap CLIProxy sekmesinde listelenir."
+                    "Claude Desktop's own account shows here once it is read, and the saved Desktop accounts keep their last known values.",
+                    "Claude Desktop'ın kendi hesabı okununca burada görünür; kayıtlı Desktop hesapları son bilinen değerleriyle kalır."
                 ))]
             }
             return [AccountsGroupView(cards: cards, activeName: activeClaudeCard(in: latestCards)?.card.name)]
+        case .claudex:
+            return claudexContent()
         case .cliproxy:
             if let cliproxyProblem { return [makeErrorBox(cliproxyProblem)] }
             guard !latestCards.isEmpty else {
@@ -4739,108 +4682,160 @@ extension QuotaViewController {
                 ))]
             }
             let total = TotalLimitCardView(summary: totalLimitSummary(for: latestCards), weeklyTitle: weeklyPoolTitle(for: latestCards))
-            total.translatesAutoresizingMaskIntoConstraints = false
             return [total, AccountsGroupView(cards: latestCards.sorted(by: sortCards), activeName: activeClaudeCard(in: latestCards)?.card.name)]
-        case .grandeClaudex:
-            return grandeClaudexContent()
         }
     }
 
     private func selectClaudeTab(_ tab: ClaudeLimitsTab) {
         guard tab != AppConfig.claudeTab() else { return }
         AppConfig.setClaudeTab(tab)
-        renderClaudeLimits()
-        refreshGrandeClaudex()
+        rebuildClaudeTabContent(withTabs: true)
+        if tab == .claudex {
+            refreshClaudex()
+        }
     }
 
-    /// Reads gdc's cache, which is quick and free; only the refresh button probes the accounts.
-    private func refreshGrandeClaudex() {
-        guard AppConfig.mode() == .claude, AppConfig.claudeTab() == .grandeClaudex,
-              !grandeClaudexReading, !grandeClaudexProbing else { return }
-        grandeClaudexReading = true
+    /// The workers' limits come from `gdc usage --json`, always off the main thread. A refresh
+    /// probes them first (`--probe`: Claude Code's `/usage`, no model call) when the last probe is
+    /// at least `claudexProbeInterval` old and only reads gdc's cache otherwise; the tab's button
+    /// probes right away.
+    private func refreshClaudex(probeNow: Bool = false) {
+        guard AppConfig.mode() == .claude else { return }
+        guard !claudexInFlight else {
+            if probeNow, !claudexProbing { claudexProbeQueued = true }
+            return
+        }
+        // The auto-refresh timer drifts a few seconds off its beat; a probe due within that counts as due.
+        let probe = probeNow || lastClaudexProbeAt.map { Date().timeIntervalSince($0) > AppConfig.claudexProbeInterval - 5 } ?? true
+        claudexInFlight = true
+        claudexProbing = probe
+        if probe { lastClaudexProbeAt = Date() }
+        updateClaudexStatus()
         DispatchQueue.global(qos: .utility).async {
-            let result = GrandeClaudexCLI.fetch(probe: false)
+            let result = GrandeClaudexCLI.fetch(probe: probe)
             DispatchQueue.main.async {
-                self.grandeClaudexReading = false
-                self.applyGrandeClaudex(result)
+                self.claudexInFlight = false
+                self.claudexProbing = false
+                self.applyClaudex(result)
+                if self.claudexProbeQueued {
+                    self.claudexProbeQueued = false
+                    self.refreshClaudex(probeNow: true)
+                }
             }
         }
     }
 
-    /// Makes one tiny haiku call per account, so it runs only when the button is pressed.
-    @objc private func probeGrandeClaudex() {
-        guard !grandeClaudexProbing else { return }
-        grandeClaudexProbing = true
-        rebuildClaudeTabContent()
-        DispatchQueue.global(qos: .utility).async {
-            let result = GrandeClaudexCLI.fetch(probe: true)
-            DispatchQueue.main.async {
-                self.grandeClaudexProbing = false
-                self.applyGrandeClaudex(result)
-            }
-        }
+    @objc private func probeClaudex() {
+        refreshClaudex(probeNow: true)
     }
 
-    private func applyGrandeClaudex(_ result: Result<GrandeClaudexSnapshot, GrandeClaudexCLI.Failure>) {
+    private func applyClaudex(_ result: Result<GrandeClaudexSnapshot, GrandeClaudexCLI.Failure>) {
         switch result {
         case .success(let snapshot):
-            grandeClaudex = snapshot
-            grandeClaudexProblem = nil
-        case .failure(let failure):
-            switch failure {
-            case .notInstalled:
-                grandeClaudexProblem = L.text("gdc was not found at ~/.local/bin/gdc", "gdc ~/.local/bin/gdc içinde bulunamadı")
-            case .failed(let message):
-                grandeClaudexProblem = L.text("gdc failed · \(message)", "gdc hata verdi · \(message)")
-            case .unreadable:
-                grandeClaudexProblem = L.text("gdc returned data GrandeBar cannot read", "gdc'nin verdiği veri okunamadı")
-            }
+            claudex = snapshot
+            claudexProblem = nil
+        case .failure(.notInstalled):
+            claudexProblem = L.text("gdc was not found at ~/.local/bin/gdc", "gdc, ~/.local/bin/gdc konumunda bulunamadı")
+        case .failure(.timedOut):
+            claudexProblem = L.text("gdc did not answer in time", "gdc zamanında yanıt vermedi")
+        case .failure(.unreadable):
+            claudexProblem = L.text("gdc's reply could not be read", "gdc'nin yanıtı okunamadı")
+        case .failure(.failed(let message)):
+            claudexProblem = L.text("gdc failed: \(message)", "gdc hata verdi: \(message)")
         }
-        guard AppConfig.mode() == .claude, AppConfig.claudeTab() == .grandeClaudex else { return }
+        guard AppConfig.mode() == .claude, AppConfig.claudeTab() == .claudex else { return }
         rebuildClaudeTabContent()
     }
 
-    private func grandeClaudexContent() -> [NSView] {
+    /// A status line with the probe button, then the workers as Desktop-style cards. While there
+    /// is nothing to show yet, a gdc failure gets the error box; later it stays on the status line
+    /// above the last read.
+    private func claudexContent() -> [NSView] {
         let header = NSView()
         header.translatesAutoresizingMaskIntoConstraints = false
-        let status: String
-        if grandeClaudexProbing {
-            status = L.text("Probing accounts…", "Hesaplar yoklanıyor…")
-        } else if let problem = grandeClaudexProblem {
-            status = problem
-        } else if let snapshot = grandeClaudex {
-            status = L.text("\(snapshot.workers.count) accounts · read from gdc cache", "\(snapshot.workers.count) hesap · gdc önbelleğinden")
-        } else {
-            status = L.text("Reading GrandeClaudex…", "GrandeClaudex okunuyor…")
-        }
-        let label = NSTextField(labelWithString: status)
+        let label = NSTextField(labelWithString: "")
         label.font = .systemFont(ofSize: 10.5, weight: .regular)
-        label.textColor = grandeClaudexProblem != nil && !grandeClaudexProbing ? NSColor.systemRed : Theme.secondaryText
         label.lineBreakMode = .byTruncatingTail
-        label.toolTip = status
         label.translatesAutoresizingMaskIntoConstraints = false
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let probe = iconButton("arrow.clockwise", action: #selector(probeGrandeClaudex))
-        probe.toolTip = L.text("Probe every account now (one tiny haiku call each)", "Tüm hesapları şimdi yokla (her biri için küçük bir haiku çağrısı)")
-        probe.isEnabled = !grandeClaudexProbing
+        let probe = iconButton("arrow.clockwise", action: #selector(probeClaudex))
+        probe.toolTip = L.text("Read every worker's limits now (Claude Code's /usage, no model call)",
+                               "Tüm worker limitlerini şimdi oku (Claude Code /usage, model çağrısı yok)")
         header.addSubview(label)
         header.addSubview(probe)
         NSLayoutConstraint.activate([
-            header.heightAnchor.constraint(equalToConstant: 24),
+            header.heightAnchor.constraint(equalToConstant: 20),
             label.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 4),
             label.centerYAnchor.constraint(equalTo: header.centerYAnchor),
             label.trailingAnchor.constraint(lessThanOrEqualTo: probe.leadingAnchor, constant: -6),
-            probe.trailingAnchor.constraint(equalTo: header.trailingAnchor),
+            probe.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: 2),
             probe.centerYAnchor.constraint(equalTo: header.centerYAnchor)
         ])
+        claudexStatusLabel = label
+        claudexProbeButton = probe
+        updateClaudexStatus()
 
-        guard let snapshot = grandeClaudex else { return [header] }
+        guard let snapshot = claudex else {
+            return claudexProblem.map { [header, makeErrorBox($0)] } ?? [header]
+        }
         guard !snapshot.workers.isEmpty else {
-            return [header, makeInfoBox(L.text("GrandeClaudex reports no Claude workers.", "GrandeClaudex Claude worker bildirmiyor."))]
+            return [header, makeInfoBox(L.text("GrandeClaudex reports no Claude workers.", "GrandeClaudex hiç Claude worker'ı bildirmiyor."))]
         }
         let now = Date()
-        let rows = snapshot.workers.map { ClaudexWorkerRowView(worker: $0, now: now) }
-        return [header, AccountsGroupView(rows: rows)]
+        return [header, AccountsGroupView(cards: snapshot.workers.map { claudexCard($0, now: now) })]
+    }
+
+    /// Updates the status line in place, so starting a probe does not rebuild the cards.
+    private func updateClaudexStatus() {
+        claudexProbeButton?.isEnabled = !claudexProbing
+        guard let label = claudexStatusLabel else { return }
+        let text: String
+        var failed = false
+        if claudexProbing {
+            text = L.text("Reading the workers' limits…", "Worker limitleri okunuyor…")
+        } else if let problem = claudexProblem, claudex != nil {
+            text = problem
+            failed = true
+        } else if let snapshot = claudex {
+            let signedIn = snapshot.workers.filter(\.loggedIn).count
+            text = L.text("\(snapshot.workers.count) Claude workers · \(signedIn) signed in",
+                          "\(snapshot.workers.count) Claude worker · \(signedIn) oturum açık")
+        } else if claudexInFlight {
+            text = L.text("Reading GrandeClaudex…", "GrandeClaudex okunuyor…")
+        } else {
+            text = claudexProblem == nil ? L.text("Not read yet", "Henüz okunmadı") : ""
+        }
+        label.stringValue = text
+        label.toolTip = text
+        label.textColor = failed ? NSColor.systemRed : Theme.secondaryText
+    }
+
+    /// A worker as a Desktop account card: email, "<plan> · <alias>" chip, the 5h row and the
+    /// weekly one named like Desktop's, and when gdc last read it.
+    private func claudexCard(_ worker: GrandeClaudexWorker, now: Date) -> QuotaCard {
+        let session = worker.loggedIn ? worker.fiveHourWindow(now: now) : nil
+        let weekly = worker.loggedIn ? worker.sevenDayWindow(now: now) : nil
+        let note: String
+        if !worker.loggedIn {
+            note = L.text("\(worker.alias) · not logged in", "\(worker.alias) · oturum açık değil")
+        } else if let error = worker.error {
+            note = L.text("\(worker.alias) · read failed: \(error)", "\(worker.alias) · okunamadı: \(error)")
+        } else if let checkedAt = worker.checkedAt {
+            note = lastReadNote(worker.alias, at: checkedAt, resetSince: session?.hasReset == true || weekly?.hasReset == true)
+        } else {
+            note = L.text("\(worker.alias) · not read yet", "\(worker.alias) · henüz okunmadı")
+        }
+        let plan = worker.planTitle ?? "Claudex"
+        return QuotaCard(
+            name: worker.email ?? worker.alias, plan: plan,
+            sessionPercent: session?.remainingPercent, sessionResetSeconds: session?.resetSeconds,
+            weeklyPercent: weekly?.remainingPercent, weeklyResetSeconds: weekly?.resetSeconds,
+            resetCreditsAvailableCount: nil, resetCreditExpiries: [],
+            allowed: nil, limitReached: nil, updatedAt: now,
+            weeklyLabel: worker.weeklyModel,
+            headline: "\(plan) · \(worker.alias)",
+            note: note
+        )
     }
 
     private func finishProviderAction(_ failure: Error?) {

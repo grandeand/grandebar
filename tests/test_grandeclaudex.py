@@ -5,6 +5,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 
 
@@ -34,6 +35,8 @@ func describe(_ snapshot: GrandeClaudexSnapshot, now: Date) -> [String: Any] {
                 "alias": worker.alias,
                 "email": worker.email ?? NSNull(),
                 "loggedIn": worker.loggedIn,
+                "plan": worker.planTitle ?? NSNull(),
+                "weeklyModel": worker.weeklyModel ?? NSNull(),
                 "status": worker.status ?? NSNull(),
                 "fiveHour": window(worker.fiveHourWindow(now: now)),
                 "sevenDay": window(worker.sevenDayWindow(now: now)),
@@ -59,6 +62,7 @@ case "fetch":
     case .success(let snapshot): emit(["ok": describe(snapshot, now: Date())])
     case .failure(.notInstalled): emit(["failure": "notInstalled"])
     case .failure(.unreadable): emit(["failure": "unreadable"])
+    case .failure(.timedOut): emit(["failure": "timedOut"])
     case .failure(.failed(let message)): emit(["failure": "failed", "message": message])
     }
 default:
@@ -77,12 +81,15 @@ def worker(**overrides):
         "email": "grande1@example.com",
         "logged_in": True,
         "login_email": "grande1@example.com",
+        "plan": "team",
+        "org": "Example",
         "model": None,
         "status": "allowed",
         "five_hour": 0.04,
         "five_hour_resets_at": NOW + 6400,
         "seven_day": None,
         "seven_day_resets_at": None,
+        "seven_day_label": None,
         "checked_at": "2026-10-15T21:04:55.647396+00:00",
         "error": None,
     }
@@ -149,6 +156,41 @@ class GrandeClaudexTests(unittest.TestCase):
         self.assertEqual(row["fiveHour"], {"remaining": 96, "reset": 6400, "hasReset": False})
         self.assertEqual(row["sevenDay"], {"remaining": 50, "reset": 90_000, "hasReset": False})
 
+    def test_zero_and_full_use_are_values_not_booleans(self):
+        # JSON 0.0 and 1.0 cast to Bool in Swift; they must still read as numbers.
+        rows = self.parse(payload(
+            worker(id="a", five_hour=0.0, seven_day=1.0, seven_day_resets_at=NOW + 60),
+            worker(id="b", five_hour=0, seven_day=1, seven_day_resets_at=NOW + 60),
+            worker(id="c", five_hour=True, seven_day=False),
+        ))["workers"]
+        for row in rows[:2]:
+            self.assertEqual(row["fiveHour"]["remaining"], 100)
+            self.assertEqual(row["sevenDay"]["remaining"], 0)
+        self.assertIsNone(rows[2]["fiveHour"])
+        self.assertIsNone(rows[2]["sevenDay"])
+
+    def test_plan_and_weekly_row_name(self):
+        rows = self.parse(payload(
+            worker(id="a", plan="team", seven_day=0.28, seven_day_resets_at=NOW + 90_000, seven_day_label="Fable"),
+            worker(id="b", plan="max", seven_day=0.1, seven_day_resets_at=NOW + 90_000, seven_day_label="all models"),
+            worker(id="c", plan=None, seven_day_label=None),
+        ))["workers"]
+        self.assertEqual([(r["plan"], r["weeklyModel"]) for r in rows], [("Team", "Fable"), ("Max", None), (None, None)])
+        self.assertEqual(rows[0]["sevenDay"], {"remaining": 72, "reset": 90_000, "hasReset": False})
+
+    def test_signed_in_account_wins_over_the_configured_one(self):
+        rows = self.parse(payload(
+            worker(id="a", email="meant@example.com", login_email="actual@example.com"),
+            worker(id="b", email="meant@example.com", login_email=None, logged_in=False),
+            worker(id="c", email=None, login_email=None, alias=""),
+        ))["workers"]
+        self.assertEqual([r["email"] for r in rows], ["actual@example.com", "meant@example.com", None])
+        self.assertEqual(rows[2]["alias"], "c")
+
+    def test_logged_in_must_be_a_boolean(self):
+        rows = self.parse(payload(worker(id="a", logged_in=1), worker(id="b", logged_in="yes"), worker(id="c", logged_in=True)))["workers"]
+        self.assertEqual([r["loggedIn"] for r in rows], [False, False, True])
+
     def test_unknown_values_stay_unknown(self):
         row = self.parse(payload(worker(five_hour=None, five_hour_resets_at=None)))["workers"][0]
         self.assertIsNone(row["fiveHour"])
@@ -194,13 +236,38 @@ class GrandeClaudexTests(unittest.TestCase):
         self.assertEqual(self.fetch(self.work / "missing-gdc"), {"failure": "notInstalled"})
         failing = self.fake_gdc("echo 'no cache' >&2\nexit 3\n")
         self.assertEqual(self.fetch(failing), {"failure": "failed", "message": "no cache"})
+        traceback = self.fake_gdc("printf 'Traceback (most recent call last):\\n  File x\\nGdcError: no roster\\n\\n' >&2\nexit 1\n")
+        self.assertEqual(self.fetch(traceback), {"failure": "failed", "message": "GdcError: no roster"})
+        silent = self.fake_gdc("exit 4\n")
+        self.assertEqual(self.fetch(silent), {"failure": "failed", "message": "gdc exited with 4"})
         garbage = self.fake_gdc("echo not-json\n")
         self.assertEqual(self.fetch(garbage), {"failure": "unreadable"})
 
     def test_fetch_stops_a_hung_gdc(self):
-        hung = self.fake_gdc("sleep 30\n")
-        result = self.fetch(hung, timeout=1)
-        self.assertEqual(result["failure"], "failed")
+        hung = self.fake_gdc("exec sleep 30\n")
+        started = time.monotonic()
+        self.assertEqual(self.fetch(hung, timeout=1), {"failure": "timedOut"})
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_fetch_does_not_wait_on_a_child_holding_the_pipe(self):
+        stray = self.fake_gdc("(sleep 30 &)\nexit 0\n")
+        started = time.monotonic()
+        self.assertEqual(self.fetch(stray), {"failure": "timedOut"})
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_fetch_reads_a_reply_larger_than_a_pipe_buffer(self):
+        workers = [worker(id=f"w{i}", alias=f"w{i}") for i in range(1500)]
+        reply = self.work / "big.json"
+        reply.write_text(json.dumps(payload(*workers)))
+        self.assertGreater(reply.stat().st_size, 256 * 1024)
+        big = self.fake_gdc(f"cat '{reply}'\necho \"$(head -c 200000 /dev/zero | tr '\\0' x)\" >&2\n")
+        self.assertEqual(len(self.fetch(big)["ok"]["workers"]), 1500)
+
+    def test_fetch_finds_tools_in_the_user_bin(self):
+        script = 'printf \'{"chief": "%s", "workers": []}\' "$PATH"\n'
+        path = self.fetch(self.fake_gdc(script))["ok"]["chief"].split(":")
+        self.assertEqual(path[0], str(Path.home() / ".local/bin"))
+        self.assertIn("/opt/homebrew/bin", path)
 
 
 if __name__ == "__main__":
