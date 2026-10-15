@@ -24,11 +24,43 @@ func emit(_ result: ClaudeSessionSharing.Result) {
     print(String(data: data, encoding: .utf8)!)
 }
 
+/// Stands in for Claude Desktop: quitting flushes what it still held, i.e. staged *.flush files
+/// land with the current time.
+final class FakeDesktop: DesktopAppControl {
+    let support: URL
+    private(set) var isRunning = true
+    init(home: String) { support = URL(fileURLWithPath: home).appendingPathComponent("Library/Application Support") }
+
+    func quitAndWait(timeout: TimeInterval) -> Bool {
+        var staged: [URL] = []
+        for case let url as URL in FileManager.default.enumerator(at: support, includingPropertiesForKeys: nil)! where url.pathExtension == "flush" {
+            staged.append(url)
+        }
+        for url in staged {
+            let path = url.deletingPathExtension().path
+            guard rename(url.path, path) == 0, utimes(path, nil) == 0 else { return false }
+        }
+        isRunning = false
+        return true
+    }
+
+    func launch() { isRunning = true }
+}
+
 let arguments = CommandLine.arguments
 let sharing = ClaudeSessionSharing(home: arguments[2])
 switch arguments[1] {
 case "sync":
     emit(sharing.sync(desktopClosed: arguments[3] == "closed"))
+case "switch":
+    // GrandeBar's switch: quit Desktop, restore the account, sync while closed, relaunch.
+    let desktop = FakeDesktop(home: arguments[2])
+    let accounts = ClaudeDesktopAccounts(home: arguments[2], app: desktop)
+    var synced = ClaudeSessionSharing.Result()
+    try accounts.switchTo(arguments[3]) { synced = sharing.sync(desktopClosed: true) }
+    precondition(desktop.isRunning, "Desktop was not relaunched")
+    print(accounts.liveAccountUUID() ?? "")
+    emit(synced)
 default:
     exit(2)
 }
@@ -81,7 +113,7 @@ class Sandbox(unittest.TestCase):
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def write(self, folder, sid, age=60.0, **fields):
+    def write(self, folder, sid, age=60.0, suffix="", **fields):
         """Writes a session file as Desktop would, `age` seconds ago."""
         record = {
             "sessionId": f"local_{sid}",
@@ -94,7 +126,7 @@ class Sandbox(unittest.TestCase):
             "spawnSeed": {"isArchived": True, "note": 'a "quoted" {brace} [bracket] \\ "isArchived":true'},
         }
         record.update(fields)
-        path = folder / f"local_{sid}.json"
+        path = folder / f"local_{sid}.json{suffix}"
         path.write_text(json.dumps(record, separators=(",", ":")))
         stamp = time.time_ns() - int(age * SECOND)
         os.utime(path, ns=(stamp, stamp))
@@ -376,6 +408,50 @@ class ArchiveTests(Sandbox):
             self.c.chmod(0o700)
         self.assertEqual(self.sync()["updated"], 1)
         self.assertTrue(self.read(self.c, sid)["isArchived"])
+
+
+class SwitchFlowTests(Sandbox):
+    """The account switch end to end on fake folders: ClaudeDesktopAccounts.switchTo with a fake
+    Desktop, running the same closed sync GrandeBar runs while Desktop is closed."""
+
+    def setUp(self):
+        super().setUp()
+        accounts = self.support / "GrandeBar" / "ClaudeDesktop" / "accounts"
+        for alias, account in (("a", ACCOUNT_A), ("b", ACCOUNT_B)):
+            profile = accounts / alias
+            (profile / "desktop-state").mkdir(parents=True)
+            (profile / "meta.json").write_text(json.dumps({"accountUuid": account, "label": alias}))
+            (profile / "config-tokenCacheV2").write_text(f"encrypted-{alias}")
+        config = {"lastKnownAccountUuid": ACCOUNT_A, "oauth:tokenCacheV2": "encrypted-a"}
+        (self.support / "Claude" / "config.json").write_text(json.dumps(config))
+
+    def switch(self, alias):
+        result = subprocess.run([str(BINARY), "switch", str(self.home), alias], check=True, capture_output=True, text=True)
+        live, synced = result.stdout.splitlines()
+        return live, json.loads(synced)
+
+    def test_switches_carry_every_archive_action(self):
+        old, flushed = self.shared(), self.shared()
+        # On A: one session archived long ago, one archived right before the switch, which Desktop
+        # only writes as it quits.
+        self.write(self.a, old, age=300, isArchived=True)
+        self.sync()
+        self.write(self.a, flushed, suffix=".flush", isArchived=True)
+        live, _ = self.switch("b")
+        self.assertEqual(live, ACCOUNT_B)
+        for sid in (old, flushed):
+            self.assertEqual(self.archived(sid, *self.folders), [True, True, True])
+        # On B: Desktop loaded the archived copies; un-archiving one spreads while B runs.
+        self.write(self.b, old, age=5, isArchived=False, autoArchiveExempt=True)
+        self.sync()
+        self.assertEqual(self.archived(old, *self.folders), [False, False, False])
+        # Back on A, and passes after that, nothing reverts.
+        live, _ = self.switch("a")
+        self.assertEqual(live, ACCOUNT_A)
+        self.sync()
+        self.assertEqual(self.archived(old, *self.folders), [False, False, False])
+        self.assertEqual(self.archived(flushed, *self.folders), [True, True, True])
+        self.assertEqual(json.loads((self.support / "Claude" / "config.json").read_text())["oauth:tokenCacheV2"], "encrypted-a")
 
 
 if __name__ == "__main__":

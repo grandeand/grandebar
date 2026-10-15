@@ -5240,8 +5240,8 @@ extension QuotaViewController {
 
     fileprivate static var sessionSharingInfo: String {
         L.text(
-            "When this is on, every Claude Desktop account and the CLIProxy profile list the same Code-tab sessions: GrandeBar copies the session list between them now and every 10 seconds while it runs. Deleting a session in one account deletes it everywhere. Chat-tab conversations stay with their claude.ai account and Cowork sessions are not shared.",
-            "Bu ayar açıkken tüm Claude Desktop hesapları ve CLIProxy profili aynı Code sekmesi oturumlarını listeler: GrandeBar oturum listesini şimdi ve açık kaldığı sürece her 10 saniyede bir aralarında kopyalar. Bir hesapta sildiğin oturum her yerden silinir. Chat sekmesindeki sohbetler kendi claude.ai hesabında kalır, Cowork oturumları paylaşılmaz."
+            "When this is on, every Claude Desktop account and the CLIProxy profile list the same Code-tab sessions: GrandeBar copies the session list between them now and every 10 seconds while it runs. Deleting a session in one account deletes it everywhere, and archiving or un-archiving one does the same. Chat-tab conversations stay with their claude.ai account and Cowork sessions are not shared.",
+            "Bu ayar açıkken tüm Claude Desktop hesapları ve CLIProxy profili aynı Code sekmesi oturumlarını listeler: GrandeBar oturum listesini şimdi ve açık kaldığı sürece her 10 saniyede bir aralarında kopyalar. Bir hesapta sildiğin oturum her yerden silinir; arşivlediğin ya da arşivden çıkardığın oturum da her yerde öyle olur. Chat sekmesindeki sohbetler kendi claude.ai hesabında kalır, Cowork oturumları paylaşılmaz."
         )
     }
 
