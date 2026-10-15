@@ -407,8 +407,13 @@ final class ClaudeSessionSharing {
                 if errno == EEXIST { return false }
                 throw CocoaError(.fileWriteUnknown)
             }
-        } else if rename(tmp.path, destination.path) != 0 {
-            throw CocoaError(.fileWriteUnknown)
+        } else {
+            // The check above and this rename are not atomic, and that gap is accepted: Desktop
+            // writes only the folders of the account it has loaded; those are written here only
+            // after a fresh isDesktopRunning() reported it stopped; and Desktop loads its session
+            // folder about 15 s after launch, so it cannot save within microseconds of appearing.
+            // No other folder is ever written by Desktop.
+            guard rename(tmp.path, destination.path) == 0 else { throw CocoaError(.fileWriteUnknown) }
         }
         return true
     }
