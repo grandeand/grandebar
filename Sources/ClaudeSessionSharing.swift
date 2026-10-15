@@ -5,7 +5,8 @@ import Foundation
 // ~/.claude/projects, so copying the index files is enough to show the same sessions in every
 // account. The app refuses symlinked storage folders, so plain files are mirrored:
 //
-// * a deleted_<id> tombstone spreads everywhere and removes local_<id>.json copies;
+// * a deleted_<id> tombstone spreads everywhere and removes local_<id>.json copies, unless
+//   Desktop itself removed it (it does when it imports a CLI session under that id);
 // * for every local_<id>.json the newest settled copy (by mtime) wins;
 // * archiving spreads like deleting: the latest archive or un-archive anywhere wins everywhere.
 //
@@ -54,6 +55,8 @@ final class ClaudeSessionSharing {
         var archive: [String: Archive] = [:]
         /// Folder (relative to home) -> session id -> the copy last seen or written there.
         var copies: [String: [String: Copy]] = [:]
+        /// Session id -> folders (relative to home) that held its tombstone.
+        var tombstones: [String: [String]] = [:]
     }
 
     private static let tmpName = ".claude-session-sync-tmp"
@@ -114,27 +117,41 @@ final class ClaudeSessionSharing {
             saved = ledger
         }
 
-        // 1) Tombstones: spread them and drop the deleted sessions everywhere.
+        // 1) Tombstones: spread them and drop the deleted sessions everywhere. Desktop removes a
+        //    tombstone itself only when it imports a CLI session under that id, so one gone from a
+        //    folder that held it is removed everywhere instead of being spread back.
+        let folderKeys = Set(dirs.map(folderKey))
         var tombSource: [String: URL] = [:]
+        var holders: [String: Set<String>] = [:]
         for dir in dirs {
             for name in listing[dir, default: [:]].keys.sorted() {
-                if let id = Self.tombstoneID(name), tombSource[id] == nil {
-                    tombSource[id] = dir.appendingPathComponent(name)
-                }
+                guard let id = Self.tombstoneID(name) else { continue }
+                holders[id, default: []].insert(folderKey(dir))
+                if tombSource[id] == nil { tombSource[id] = dir.appendingPathComponent(name) }
             }
         }
         for (id, source) in tombSource {
+            let tomb = "deleted_" + id
+            let lost = Set(ledger.tombstones[id] ?? []).intersection(folderKeys).subtracting(holders[id] ?? [])
+            if !lost.isEmpty {
+                let left = dirs.filter { listing[$0]?[tomb] != nil && (try? fm.removeItem(at: $0.appendingPathComponent(tomb))) == nil }
+                if left.isEmpty { ledger.tombstones[id] = nil }
+                tombSource[id] = nil
+                continue
+            }
+            var held: [String] = []
             for dir in dirs {
-                let tomb = "deleted_" + id
-                if listing[dir]?[tomb] == nil {
-                    try? atomicCopy(source, to: dir.appendingPathComponent(tomb))
+                if listing[dir]?[tomb] != nil || (try? atomicCopy(source, to: dir.appendingPathComponent(tomb))) != nil {
+                    held.append(folderKey(dir))
                 }
                 let session = "local_\(id).json"
                 if listing[dir]?[session] != nil, (try? fm.removeItem(at: dir.appendingPathComponent(session))) != nil {
                     result.removed += 1
                 }
             }
+            ledger.tombstones[id] = held
         }
+        ledger.tombstones = ledger.tombstones.filter { holders[$0.key] != nil }
 
         // 2) Archive actions. A copy whose isArchived differs from what its own folder held is an
         //    action, dated by its mtime; the latest one wins. Saving the value the folder already
@@ -169,7 +186,6 @@ final class ClaudeSessionSharing {
         ledger.archive.merge(firstSeen) { current, _ in current }
         let ids = Set(names.compactMap(Self.sessionID))
         ledger.archive = ledger.archive.filter { ids.contains($0.key) }
-        let folderKeys = Set(dirs.map(folderKey))
         ledger.copies = ledger.copies.filter { folderKeys.contains($0.key) }
         // Saved before anything is written, so an interrupted pass replays the same decisions.
         persist()

@@ -281,6 +281,22 @@ class ArchiveTests(Sandbox):
         self.assertIsNone(self.read(self.c, sid))
         self.assertNotIn(sid, json.loads(self.ledger().read_text())["archive"])
 
+    def test_tombstone_desktop_removed_on_a_cli_import_is_removed_everywhere(self):
+        self.signed_in(ACCOUNT_A)
+        sid = str(uuid.uuid4())
+        (self.a / f"deleted_{sid}").write_text("1790000000000")
+        self.sync()
+        self.assertTrue(all((folder / f"deleted_{sid}").exists() for folder in self.folders))
+        # Desktop imports the CLI session under that id: it drops the tombstone, then saves the
+        # session a moment later, possibly with a pass in between.
+        (self.a / f"deleted_{sid}").unlink()
+        self.sync()
+        self.write(self.a, sid, age=5, title="Imported")
+        self.sync()
+        for folder in self.folders:
+            self.assertFalse((folder / f"deleted_{sid}").exists())
+            self.assertEqual(self.read(folder, sid)["title"], "Imported")
+
     def test_first_run_starts_from_the_newest_copy(self):
         newer, tie = str(uuid.uuid4()), str(uuid.uuid4())
         self.write(self.a, newer, age=100, isArchived=True, title="Newest")
