@@ -117,6 +117,13 @@ private enum AppConfig {
         set { UserDefaults.standard.set(newValue, forKey: proxySetupSkippedKey) }
     }
 
+    static let providerCardCollapsedKey = "providerCardCollapsed"
+    /// The Claude provider card folded to its one-line strip by its chevron.
+    static var providerCardCollapsed: Bool {
+        get { UserDefaults.standard.bool(forKey: providerCardCollapsedKey) }
+        set { UserDefaults.standard.set(newValue, forKey: providerCardCollapsedKey) }
+    }
+
     static func hasManagementKey(for mode: AppMode) -> Bool {
         !managementKey(for: mode).isEmpty
     }
@@ -196,6 +203,7 @@ private enum UI {
     static let popoverHeight: CGFloat = 507
     static let modeRowHeight: CGFloat = 26
     static let providerCardHeight: CGFloat = 92
+    static let providerCardCollapsedHeight: CGFloat = 28
     static let cardWidth: CGFloat = 301
     static let accountCardHeight: CGFloat = 106
     static let summaryCardHeight: CGFloat = 104
@@ -4489,16 +4497,23 @@ private enum ClaudeProviderSwitcher {
 
 /// Two independent routes, each "<target> → option / option" with the filled chip active:
 /// "Code" only edits ~/.claude/settings.json; "Desktop" picks a saved claude.ai login (menu on
-/// the account chip) or routes Desktop through CLIProxy.
+/// the account chip) or routes Desktop through CLIProxy. The chevron folds the card to a
+/// one-line strip that opens again on a click anywhere on it.
 private final class ProviderSwitchCardView: RoundedView {
     struct Actions {
         let code: (Bool) -> Void
         let desktopRoute: (Bool) -> Void
         let desktopAccounts: (NSView) -> Void
         let sessionSharing: (Bool) -> Void
+        let toggleCollapsed: () -> Void
     }
 
-    init(actions: Actions) {
+    private let collapsed: Bool
+    private let onToggle: () -> Void
+
+    init(actions: Actions, collapsed: Bool) {
+        self.collapsed = collapsed
+        onToggle = actions.toggleCollapsed
         super.init(color: Theme.cardBackground, radius: 10)
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -4507,6 +4522,38 @@ private final class ProviderSwitchCardView: RoundedView {
         let alias = ClaudeProviderSwitcher.desktopAccounts.activeAlias()
         let pending = DesktopLoginState.pendingAlias != nil
         toolTip = "Code: \(code.label) · Desktop: \(desktop == .official ? (alias ?? "claude.ai") : desktop.label)"
+
+        let toggle = NSButton(title: "", target: self, action: #selector(toggleClicked))
+        toggle.image = NSImage(systemSymbolName: collapsed ? "chevron.down" : "chevron.up", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold))
+        toggle.imagePosition = .imageOnly
+        toggle.bezelStyle = .regularSquare
+        toggle.isBordered = false
+        toggle.contentTintColor = Theme.secondaryText
+        toggle.toolTip = collapsed ? L.text("Show routes", "Yönlendirmeyi göster") : L.text("Hide routes", "Yönlendirmeyi gizle")
+        toggle.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(toggle)
+        NSLayoutConstraint.activate([
+            toggle.widthAnchor.constraint(equalToConstant: 20),
+            toggle.heightAnchor.constraint(equalToConstant: 20),
+            toggle.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6)
+        ])
+
+        if collapsed {
+            let title = NSTextField(labelWithString: L.text("Routes", "Yönlendirme"))
+            title.font = .systemFont(ofSize: 11, weight: .regular)
+            title.textColor = Theme.secondaryText
+            title.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(title)
+            NSLayoutConstraint.activate([
+                heightAnchor.constraint(equalToConstant: UI.providerCardCollapsedHeight),
+                title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 11),
+                title.centerYAnchor.constraint(equalTo: centerYAnchor),
+                title.trailingAnchor.constraint(lessThanOrEqualTo: toggle.leadingAnchor, constant: -6),
+                toggle.centerYAnchor.constraint(equalTo: centerYAnchor)
+            ])
+            return
+        }
 
         // Without CLIProxy configured the proxy option would only fail, unless it is in use already.
         let proxyAvailable = AppConfig.hasManagementKey(for: .claude) || code == .proxy || desktop == .proxy
@@ -4552,12 +4599,31 @@ private final class ProviderSwitchCardView: RoundedView {
             rows.centerYAnchor.constraint(equalTo: centerYAnchor),
             codeLabel.widthAnchor.constraint(equalTo: desktopLabel.widthAnchor),
             sessionsLabel.widthAnchor.constraint(equalTo: desktopLabel.widthAnchor),
-            accountChip.widthAnchor.constraint(lessThanOrEqualToConstant: 110)
+            accountChip.widthAnchor.constraint(lessThanOrEqualToConstant: 110),
+            // The Code row is the shortest, so the chevron sits at its end.
+            toggle.centerYAnchor.constraint(equalTo: codeRow.centerYAnchor),
+            codeRow.trailingAnchor.constraint(lessThanOrEqualTo: toggle.leadingAnchor, constant: -4)
         ])
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    @objc private func toggleClicked() {
+        onToggle()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if !collapsed { super.mouseDown(with: event) }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if collapsed { onToggle() } else { super.mouseUp(with: event) }
+    }
+
+    override func resetCursorRects() {
+        if collapsed { addCursorRect(bounds, cursor: .pointingHand) }
     }
 
     private static func row(_ target: NSView, _ first: NSView, _ second: NSView?) -> NSStackView {
@@ -4766,21 +4832,34 @@ extension QuotaViewController {
             code: { [weak self] proxy in self?.switchClaudeCode(proxy: proxy) },
             desktopRoute: { [weak self] proxy in self?.switchDesktopRoute(proxy: proxy) },
             desktopAccounts: { [weak self] anchor in self?.showDesktopAccountMenu(from: anchor) },
-            sessionSharing: { [weak self] on in self?.setSessionSharing(on) }
-        ))
+            sessionSharing: { [weak self] on in self?.setSessionSharing(on) },
+            toggleCollapsed: { [weak self] in self?.toggleProviderCard() }
+        ), collapsed: AppConfig.providerCardCollapsed)
     }
 
     /// Rebuilds only the provider card, so an error screen stays as it is.
     private func refreshProviderCard() {
-        guard let index = stackView.arrangedSubviews.firstIndex(where: { $0 is ProviderSwitchCardView }) else { return }
+        guard replaceProviderCard() else { return }
+        refreshActiveAccount()
+        refreshDesktopUsage()
+    }
+
+    /// Folds the provider card to its strip or opens it again; the choice survives relaunches.
+    private func toggleProviderCard() {
+        AppConfig.providerCardCollapsed.toggle()
+        guard replaceProviderCard() else { return }
+        resizeDocument()
+    }
+
+    private func replaceProviderCard() -> Bool {
+        guard let index = stackView.arrangedSubviews.firstIndex(where: { $0 is ProviderSwitchCardView }) else { return false }
         let old = stackView.arrangedSubviews[index]
         stackView.removeArrangedSubview(old)
         old.removeFromSuperview()
         let card = makeProviderCard()
         stackView.insertArrangedSubview(card, at: index)
         card.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
-        refreshActiveAccount()
-        refreshDesktopUsage()
+        return true
     }
 
     /// The Desktop card, only while Desktop is on claude.ai and still signed into that account.
