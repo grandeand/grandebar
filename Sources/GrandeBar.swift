@@ -64,9 +64,9 @@ private enum AppConfig {
         UserDefaults.standard.set(tab.rawValue, forKey: claudeTabKey)
     }
 
-    /// The footer's cost view follows the mode until one is picked by clicking the footer.
+    /// The Claude mode footer's cost view, picked by clicking the footer.
     static func costView() -> CostView {
-        CostView.resolved(UserDefaults.standard.string(forKey: costViewKey), claudeMode: mode() == .claude)
+        CostView.resolved(UserDefaults.standard.string(forKey: costViewKey))
     }
 
     static func setCostView(_ view: CostView) {
@@ -268,7 +268,7 @@ private enum Theme {
 private extension CostView {
     var title: String {
         switch self {
-        case .codex: return "Codex"
+        case .grandeCodex: return "GrandeCodex"
         case .claude: return "Claude"
         case .total: return L.text("Total", "Toplam")
         }
@@ -277,7 +277,7 @@ private extension CostView {
     /// Codex blue and Claude orange as on the mode switch; the total is neutral.
     var tint: NSColor {
         switch self {
-        case .codex: return .systemBlue
+        case .grandeCodex: return .systemBlue
         case .claude: return Theme.claudeAccent
         case .total: return .labelColor
         }
@@ -285,21 +285,21 @@ private extension CostView {
 
     var detail: String {
         switch self {
-        case .codex:
-            return L.text("Codex cost: all Codex homes, GrandeClaudex workers included",
-                          "Codex maliyeti: tüm Codex home'ları, GrandeClaudex worker'ları dahil")
+        case .grandeCodex:
+            return L.text("GrandeCodex cost: the GrandeClaudex Codex workers (~/.codex-workers)",
+                          "GrandeCodex maliyeti: GrandeClaudex Codex worker'ları (~/.codex-workers)")
         case .claude:
-            return L.text("Claude Code cost, GrandeClaudex workers included",
-                          "Claude Code maliyeti, GrandeClaudex worker'ları dahil")
+            return L.text("Claude Code cost, GrandeClaudex Claude workers included",
+                          "Claude Code maliyeti, GrandeClaudex Claude worker'ları dahil")
         case .total:
-            return L.text("Total: Codex + Claude Code cost", "Toplam: Codex + Claude Code maliyeti")
+            return L.text("Total: Claude Code + GrandeCodex cost", "Toplam: Claude Code + GrandeCodex maliyeti")
         }
     }
 
     /// Name on the copied summary's cost lines.
     var summaryName: String {
         switch self {
-        case .codex: return L.text("Codex cost", "Codex maliyeti")
+        case .grandeCodex: return L.text("GrandeCodex cost", "GrandeCodex maliyeti")
         case .claude: return L.text("Claude Code cost", "Claude Code maliyeti")
         case .total: return L.text("Total cost", "Toplam maliyet")
         }
@@ -1140,11 +1140,16 @@ final class QuotaViewController: NSViewController {
         }
     }
 
-    /// Both costs are read on every refresh whatever the mode, each on its own so a slow first
-    /// read of one does not hold the other back.
+    /// Each mode reads only the costs its footer shows, each on its own so a slow first read of
+    /// one does not hold the other back. Real Codex and GrandeCodex are never mixed.
     private func refreshLocalUsage() {
-        readLocalCost(into: \.codex) { LocalCodexUsage.read() }
-        readLocalCost(into: \.claude) { LocalClaudeUsage.read() }
+        switch AppConfig.mode() {
+        case .codex:
+            readLocalCost(into: \.codex) { LocalCodexUsage.read(.codex) }
+        case .claude:
+            readLocalCost(into: \.grandeCodex) { LocalCodexUsage.read(.grandeCodex) }
+            readLocalCost(into: \.claude) { LocalClaudeUsage.read() }
+        }
     }
 
     private func readLocalCost(into slot: WritableKeyPath<LocalCosts, CostReading>, read: @escaping () -> LocalUsage?) {
@@ -1161,24 +1166,38 @@ final class QuotaViewController: NSViewController {
         }
     }
 
+    /// Codex mode: a plain "Cost" label and real Codex use. Claude mode: a chip that cycles.
     private func renderCost() {
-        let view = AppConfig.costView()
-        costFooter.show(title: view.title, tint: view.tint, amounts: costLineText(localCosts.reading(for: view)))
+        switch AppConfig.mode() {
+        case .codex:
+            let line = costLineText(localCosts.codex)
+            costFooter.show(title: L.text("Cost", "Maliyet"), tint: nil, amounts: line.full, shortAmounts: line.short)
+        case .claude:
+            let view = AppConfig.costView()
+            let line = costLineText(localCosts.reading(for: view))
+            costFooter.show(title: view.title, tint: view.tint, amounts: line.full, shortAmounts: line.short)
+        }
         costFooter.toolTip = costTooltip()
     }
 
     private func cycleCostView() {
+        guard AppConfig.mode() == .claude else { return }
         AppConfig.setCostView(AppConfig.costView().next)
         renderCost()
     }
 
-    /// Names the cost on screen and the next one; the refresh age stays on the last line.
+    /// Names the cost on screen and, in Claude mode, the next one; the refresh age stays last.
     private func costTooltip() -> String {
+        guard AppConfig.mode() == .claude else {
+            return [L.text("Codex cost: every Codex home except the GrandeClaudex workers",
+                           "Codex maliyeti: GrandeClaudex worker'ları hariç tüm Codex home'ları"),
+                    lastRefreshLabel.stringValue].joined(separator: "\n")
+        }
         let view = AppConfig.costView()
         var lines = [view.detail]
         if view == .total {
-            if case .unavailable = localCosts.codex {
-                lines.append(L.text("Codex cost unavailable", "Codex maliyeti hesaplanamadı"))
+            if case .unavailable = localCosts.grandeCodex {
+                lines.append(L.text("GrandeCodex cost unavailable", "GrandeCodex maliyeti hesaplanamadı"))
             }
             if case .unavailable = localCosts.claude {
                 lines.append(L.text("Claude Code cost unavailable", "Claude Code maliyeti hesaplanamadı"))
@@ -1630,7 +1649,12 @@ final class QuotaViewController: NSViewController {
     }
 
     private func usageTableText() -> String {
-        let usageLine = CostView.allCases.map(costSummaryLine).joined(separator: "\n")
+        // Codex mode: real Codex only. Claude mode: GrandeCodex, Claude Code and Total.
+        let usageLine = AppConfig.mode() == .codex
+            ? costSummaryLine(name: L.text("Codex cost", "Codex maliyeti"), localCosts.codex)
+            : CostView.allCases
+                .map { costSummaryLine(name: $0.summaryName, localCosts.reading(for: $0), isTotal: $0 == .total) }
+                .joined(separator: "\n")
 
         guard !latestCards.isEmpty else {
             return "\(usageLine)\n\(L.text("Account quota is not loaded yet.", "Hesap kotası henüz yüklenmedi."))"
@@ -1658,20 +1682,19 @@ final class QuotaViewController: NSViewController {
         )
     }
 
-    /// Codex, Claude Code and their total each get a line of their own.
-    private func costSummaryLine(_ view: CostView) -> String {
-        let name = view.summaryName
-        switch localCosts.reading(for: view) {
+    /// One cost per line in the copied summary.
+    private func costSummaryLine(name: String, _ reading: CostReading, isTotal: Bool = false) -> String {
+        switch reading {
         case .loading:
             return L.text("\(name): not read yet.", "\(name): henüz okunmadı.")
-        case .unavailable where view == .total:
-            return L.text("\(name): unavailable (needs both the Codex and the Claude Code cost).",
-                          "\(name): hesaplanamadı (Codex ve Claude Code maliyeti gerekli).")
+        case .unavailable where isTotal:
+            return L.text("\(name): unavailable (needs both the GrandeCodex and the Claude Code cost).",
+                          "\(name): hesaplanamadı (GrandeCodex ve Claude Code maliyeti gerekli).")
         case .unavailable:
             return L.text("\(name): unavailable (incomplete usage or missing model price).",
                           "\(name): hesaplanamadı (eksik kullanım veya model fiyatı).")
         case .usage(let usage):
-            let modelsSuffix = view == .total || usage.models.isEmpty
+            let modelsSuffix = isTotal || usage.models.isEmpty
                 ? ""
                 : L.text(" Models: \(usage.models.joined(separator: ", ")).", " Modeller: \(usage.models.joined(separator: ", ")).")
             return L.text(
@@ -1681,17 +1704,21 @@ final class QuotaViewController: NSViewController {
         }
     }
 
-    private func costLineText(_ reading: CostReading) -> String {
+    /// The footer line, plus a shorter one for amounts too long to fit beside a long chip.
+    private func costLineText(_ reading: CostReading) -> (full: String, short: String) {
         switch reading {
         case .loading:
-            return L.text("Today -- · Week -- · Month --", "Bugün -- · Hafta -- · Ay --")
+            let text = L.text("Today -- · Week -- · Month --", "Bugün -- · Hafta -- · Ay --")
+            return (text, text)
         case .unavailable:
-            return L.text("Token cost unavailable", "Token maliyeti hesaplanamadı")
+            let text = L.text("Token cost unavailable", "Token maliyeti hesaplanamadı")
+            return (text, text)
         case .usage(let usage):
             // Keep footer to costs only so 4–5 digit $ amounts always fit; models go in copy summary.
-            return L.text(
-                "Today \(compactCost(usage.today)) · Week \(compactCost(usage.week)) · Month \(compactCost(usage.month))",
-                "Bugün \(compactCost(usage.today)) · Hafta \(compactCost(usage.week)) · Ay \(compactCost(usage.month))"
+            let today = compactCost(usage.today), week = compactCost(usage.week), month = compactCost(usage.month)
+            return (
+                L.text("Today \(today) · Week \(week) · Month \(month)", "Bugün \(today) · Hafta \(week) · Ay \(month)"),
+                L.text("Today \(today) · Wk \(week) · Mo \(month)", "Bugün \(today) · Hft \(week) · Ay \(month)")
             )
         }
     }
@@ -1923,36 +1950,33 @@ private final class ChipView: RoundedView {
     }
 }
 
-/// The footer's cost line: a tinted chip naming the cost on screen, then today · week · month.
-/// A click moves to the next view; long amounts step down in size instead of being cut off.
+/// The footer's cost line: a title, then today · week · month. With a tint the title is a chip
+/// that cycles the view on click (Claude mode); without one it is the plain "Cost" label of
+/// Codex mode. Long amounts step down in size instead of being cut off.
 final class CostFooterView: NSView {
     var onClick: (() -> Void)?
     private let chip = NSView()
     private let titleLabel = NSTextField(labelWithString: "")
-    private let chevron = NSImageView()
     private let amountsLabel = NSTextField(labelWithString: "")
-    private var tint = NSColor.labelColor
+    /// Nil: a plain label that does not react to the mouse.
+    private var tint: NSColor?
     private var isHovered = false {
         didSet { applyColors() }
     }
 
-    /// The usual 10 pt first; smaller only when five-digit amounts would not fit otherwise.
-    private static let amountSizes: [CGFloat] = [10, 9.5, 9, 8.5]
+    private var amounts = ""
+    private var shortAmounts = ""
+
+    private var isClickable: Bool { tint != nil }
 
     init() {
         super.init(frame: .zero)
         chip.wantsLayer = true
         chip.layer?.cornerRadius = 5
         chip.layer?.cornerCurve = .continuous
-        titleLabel.font = .systemFont(ofSize: 9.5, weight: .semibold)
-        chevron.image = NSImage(systemSymbolName: "chevron.up.chevron.down", accessibilityDescription: nil)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 6.5, weight: .bold))
-        // Not withAlphaComponent: that pins labelColor to the system appearance, not the popover's.
-        chevron.alphaValue = 0.7
         amountsLabel.lineBreakMode = .byTruncatingTail
-        [titleLabel, chevron, amountsLabel].forEach { $0.setAccessibilityElement(false) }
+        [titleLabel, amountsLabel].forEach { $0.setAccessibilityElement(false) }
         chip.addSubview(titleLabel)
-        chip.addSubview(chevron)
         addSubview(chip)
         addSubview(amountsLabel)
         addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
@@ -1962,11 +1986,17 @@ final class CostFooterView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func show(title: String, tint: NSColor, amounts: String) {
+    /// `shortAmounts` abbreviates the period names for amounts that would not fit otherwise.
+    func show(title: String, tint: NSColor?, amounts: String, shortAmounts: String? = nil) {
         self.tint = tint
+        self.amounts = amounts
+        self.shortAmounts = shortAmounts ?? amounts
         titleLabel.stringValue = title
+        titleLabel.font = tint == nil ? .systemFont(ofSize: 10, weight: .regular) : .systemFont(ofSize: 9.5, weight: .semibold)
         amountsLabel.stringValue = amounts
+        if tint == nil { isHovered = false }
         applyColors()
+        window?.invalidateCursorRects(for: self)
         needsLayout = true
     }
 
@@ -1981,31 +2011,38 @@ final class CostFooterView: NSView {
         // fittingSize keeps the 2 pt a label draws inside its frame on each side; the
         // intrinsic width alone cuts the last digits off.
         let title = titleLabel.fittingSize
-        let chevronSize = chevron.image?.size ?? .zero
-        let chipHeight: CGFloat = 15
-        titleLabel.frame = NSRect(x: 3, y: round((chipHeight - title.height) / 2), width: ceil(title.width), height: title.height)
-        chevron.frame = NSRect(x: titleLabel.frame.maxX - 1, y: round((chipHeight - chevronSize.height) / 2),
-                               width: ceil(chevronSize.width), height: ceil(chevronSize.height))
-        chip.frame = NSRect(x: 0, y: round((bounds.height - chipHeight) / 2), width: chevron.frame.maxX + 5, height: chipHeight)
+        let x: CGFloat
+        if isClickable {
+            let chipHeight: CGFloat = 15
+            titleLabel.frame = NSRect(x: 3, y: round((chipHeight - title.height) / 2), width: ceil(title.width), height: title.height)
+            chip.frame = NSRect(x: 0, y: round((bounds.height - chipHeight) / 2), width: titleLabel.frame.maxX + 3, height: chipHeight)
+            x = chip.frame.maxX + 4
+        } else {
+            // Where the "Cost" label always sat.
+            chip.frame = NSRect(x: 2, y: round((bounds.height - title.height) / 2), width: ceil(title.width), height: title.height)
+            titleLabel.frame = NSRect(origin: .zero, size: chip.frame.size)
+            x = chip.frame.maxX + 2
+        }
 
-        let x = chip.frame.maxX + 4
+        // The usual 10 pt first; smaller, then abbreviated, only when the amounts would not fit.
         let available = max(0, bounds.width - x)
-        for size in Self.amountSizes {
+        let candidates: [(String, CGFloat)] = [(amounts, 10), (amounts, 9.5), (amounts, 9), (shortAmounts, 9.5), (shortAmounts, 9), (shortAmounts, 8.5)]
+        for (text, size) in candidates {
+            amountsLabel.stringValue = text
             amountsLabel.font = .monospacedDigitSystemFont(ofSize: size, weight: .medium)
             if amountsLabel.fittingSize.width <= available { break }
         }
-        let amounts = amountsLabel.fittingSize
-        amountsLabel.frame = NSRect(x: x, y: round((bounds.height - amounts.height) / 2),
-                                    width: min(ceil(amounts.width), available), height: amounts.height)
+        let fitted = amountsLabel.fittingSize
+        amountsLabel.frame = NSRect(x: x, y: round((bounds.height - fitted.height) / 2),
+                                    width: min(ceil(fitted.width), available), height: fitted.height)
     }
 
     private func applyColors() {
-        titleLabel.textColor = tint
-        chevron.contentTintColor = tint
+        titleLabel.textColor = tint ?? Theme.mutedText
         amountsLabel.textColor = isHovered ? Theme.primaryText : Theme.secondaryText
         // Layer colours do not follow the popover's appearance by themselves.
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            chip.layer?.backgroundColor = tint.withAlphaComponent(isHovered ? 0.24 : 0.14).cgColor
+            chip.layer?.backgroundColor = tint?.withAlphaComponent(isHovered ? 0.24 : 0.14).cgColor
         }
     }
 
@@ -2021,15 +2058,15 @@ final class CostFooterView: NSView {
     override func mouseDown(with event: NSEvent) {}
 
     override func mouseUp(with event: NSEvent) {
-        if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?() }
+        if isClickable, bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?() }
     }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: .pointingHand)
+        if isClickable { addCursorRect(bounds, cursor: .pointingHand) }
     }
 
     override func mouseEntered(with event: NSEvent) {
-        isHovered = true
+        if isClickable { isHovered = true }
     }
 
     override func mouseExited(with event: NSEvent) {
@@ -2041,7 +2078,7 @@ final class CostFooterView: NSView {
     }
 
     override func accessibilityRole() -> NSAccessibility.Role? {
-        .button
+        isClickable ? .button : .staticText
     }
 
     override func accessibilityLabel() -> String? {
@@ -2049,8 +2086,9 @@ final class CostFooterView: NSView {
     }
 
     override func accessibilityPerformPress() -> Bool {
-        onClick?()
-        return onClick != nil
+        guard isClickable, let onClick else { return false }
+        onClick()
+        return true
     }
 }
 
@@ -2405,7 +2443,7 @@ private final class FlippedStackView: NSStackView {
     override var isFlipped: Bool { true }
 }
 
-private enum LocalCodexUsage {
+enum LocalCodexUsage {
     private struct Entry {
         let date: Date
         let model: String?
@@ -2446,32 +2484,42 @@ private enum LocalCodexUsage {
         let cacheRead: Double
     }
 
+    /// Real Codex use and the GrandeClaudex Codex workers' (GrandeCodex) are never mixed.
+    enum Source {
+        /// Every Codex home except the GrandeClaudex workers: ~/.codex, the m365bridge
+        /// profiles and the cli-profiles.json homes.
+        case codex
+        /// Only the GrandeClaudex Codex workers in ~/.codex-workers/<id>/codex.
+        case grandeCodex
+    }
+
     private static let lock = NSLock()
-    private static var files: [String: FileState] = [:]
+    private static var files: [Source: [String: FileState]] = [:]
     private static let tokenCountMarker = Data("\"token_count\"".utf8)
     private static let turnContextMarker = Data("\"turn_context\"".utf8)
 
-    /// Reads rollout transcripts from every Codex home (default ~/.codex and the isolated
-    /// per-account m365bridge profiles) instead of `ccusage codex`, which sums the
-    /// `last_token_usage` of every `token_count` event although Codex re-emits the same event
-    /// without new usage, and which ignores `archived_sessions`. Usage is the growth of
-    /// `total_token_usage` per transcript, deduplicated across transcripts.
-    static func read() -> LocalUsage? {
+    /// Reads rollout transcripts from the source's Codex homes instead of `ccusage codex`,
+    /// which sums the `last_token_usage` of every `token_count` event although Codex re-emits
+    /// the same event without new usage, and which ignores `archived_sessions`. Usage is the
+    /// growth of `total_token_usage` per transcript, deduplicated across transcripts.
+    static func read(_ source: Source, home: String = FileManager.default.homeDirectoryForCurrentUser.path) -> LocalUsage? {
         lock.lock()
         defer { lock.unlock() }
 
         let dates = dateKeys()
         let since = min(dates.weekStart, dates.monthStart)
-        let homes = codexHomes()
-        guard !homes.isEmpty, let prices = loadPrices() else { return nil }
+        let homes = codexHomes(source, userHome: home)
+        // No GrandeClaudex Codex worker means no GrandeCodex spend, not an unknown one.
+        guard !homes.isEmpty || source == .grandeCodex, let prices = loadPrices(home: home) else { return nil }
 
         let paths = transcriptPaths(homes: homes, modifiedSince: since)
-        files = files.filter { paths.contains($0.key) }
-        for path in paths.sorted() { update(path) }
+        var cache = (files[source] ?? [:]).filter { paths.contains($0.key) }
+        for path in paths.sorted() { update(path, in: &cache) }
+        files[source] = cache
 
         // Forked and resumed sessions copy earlier events into a new transcript.
         var merged: [String: Entry] = [:]
-        for state in files.values {
+        for state in cache.values {
             merged.merge(state.entries) { current, _ in current }
         }
 
@@ -2528,7 +2576,7 @@ private enum LocalCodexUsage {
     }
 
     /// Transcripts are append-only, so only the bytes after the last complete line are parsed.
-    private static func update(_ path: String) {
+    private static func update(_ path: String, in files: inout [String: FileState]) {
         guard let handle = FileHandle(forReadingAtPath: path) else { return }
         defer { try? handle.close() }
         var state = files[path] ?? FileState()
@@ -2596,8 +2644,8 @@ private enum LocalCodexUsage {
     }
 
     /// Prices come from the bundled ccusage-format config so both stay in one place.
-    private static func loadPrices() -> [String: Price]? {
-        guard let path = ccusageConfigPath(),
+    private static func loadPrices(home: String) -> [String: Price]? {
+        guard let path = ccusageConfigPath(home: home),
               let data = FileManager.default.contents(atPath: path),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
         let codex = (json["codex"] as? [String: Any])?["defaults"] as? [String: Any]
@@ -2625,16 +2673,19 @@ private enum LocalCodexUsage {
             .flatMap { prices[$0] }
     }
 
-    /// Default Codex home + m365bridge multi-profile homes that actually have sessions.
-    private static func codexHomes() -> [String] {
+    /// The source's Codex homes that actually have sessions (or a config.toml).
+    private static func codexHomes(_ source: Source, userHome: String) -> [String] {
         let fm = FileManager.default
-        let userHome = fm.homeDirectoryForCurrentUser.path
         var homes: [String] = []
         var seen = Set<String>()
+        // GrandeClaudex Codex workers: only their transcripts are counted, never their auth files.
+        let workerRoot = "\(userHome)/.codex-workers"
 
         func add(_ path: String) {
             let resolved = (path as NSString).standardizingPath
-            guard !seen.contains(resolved) else { return }
+            // A profile list pointing into the workers' folder still is not real Codex use.
+            let isWorker = resolved.hasPrefix(workerRoot + "/")
+            guard !seen.contains(resolved), isWorker == (source == .grandeCodex) else { return }
             var isDir: ObjCBool = false
             // Prefer homes that already have session data (or a config.toml).
             let sessions = (resolved as NSString).appendingPathComponent("sessions")
@@ -2644,6 +2695,13 @@ private enum LocalCodexUsage {
             guard hasSessions || hasConfig else { return }
             seen.insert(resolved)
             homes.append(resolved)
+        }
+
+        if source == .grandeCodex {
+            for name in ((try? fm.contentsOfDirectory(atPath: workerRoot)) ?? []).sorted() {
+                add("\(workerRoot)/\(name)/codex")
+            }
+            return homes
         }
 
         add("\(userHome)/.codex")
@@ -2658,12 +2716,6 @@ private enum LocalCodexUsage {
             for name in children.sorted() {
                 add((root as NSString).appendingPathComponent(name))
             }
-        }
-
-        // GrandeClaudex Codex workers: only their transcripts are counted, never their auth files.
-        let workerRoot = "\(userHome)/.codex-workers"
-        for name in ((try? fm.contentsOfDirectory(atPath: workerRoot)) ?? []).sorted() {
-            add("\(workerRoot)/\(name)/codex")
         }
 
         // cli-profiles.json may list extra codex_home paths
@@ -2686,9 +2738,8 @@ private enum LocalCodexUsage {
     }
 
     /// Bundled Codex model pricing in ccusage config format.
-    private static func ccusageConfigPath() -> String? {
+    private static func ccusageConfigPath(home: String) -> String? {
         let fm = FileManager.default
-        let home = fm.homeDirectoryForCurrentUser.path
         var candidates: [String] = []
         if let bundled = Bundle.main.url(forResource: "ccusage", withExtension: "json")?.path {
             candidates.append(bundled)

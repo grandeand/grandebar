@@ -1,21 +1,22 @@
 import Foundation
 
-/// Which local token cost the popover footer shows. The Codex and Claude Code costs stay apart;
-/// their sum is only on screen when it is picked on purpose.
+/// Which cost the Claude mode footer shows. Codex mode shows only real Codex use; GrandeCodex
+/// (the GrandeClaudex Codex workers) belongs to Claude mode and is only added to the Claude
+/// Code cost when the total is picked on purpose.
 enum CostView: String, CaseIterable {
-    case codex
+    case grandeCodex
     case claude
     case total
 
-    /// A click on the footer moves on: Codex → Claude → Total → Codex.
+    /// A click on the footer moves on: GrandeCodex → Claude → Total → GrandeCodex.
     var next: CostView {
         let views = CostView.allCases
         return views[(views.firstIndex(of: self)! + 1) % views.count]
     }
 
-    /// The view picked last, or, until one is picked, the view that matches the mode.
-    static func resolved(_ stored: String?, claudeMode: Bool) -> CostView {
-        stored.flatMap(CostView.init(rawValue:)) ?? (claudeMode ? .claude : .codex)
+    /// The view picked last, or Claude until one is picked.
+    static func resolved(_ stored: String?) -> CostView {
+        stored.flatMap(CostView.init(rawValue:)) ?? .claude
     }
 }
 
@@ -25,24 +26,26 @@ enum CostReading {
     case usage(LocalUsage)
 }
 
-/// The latest Codex and Claude Code costs, each read on its own whatever the mode.
+/// The latest local costs, each read on its own.
 struct LocalCosts {
+    /// Real Codex use, every Codex home except the GrandeClaudex workers; Codex mode only.
     var codex: CostReading = .loading
+    var grandeCodex: CostReading = .loading
     var claude: CostReading = .loading
 
     /// The total needs both costs: when one cannot be computed, neither can the sum.
     func reading(for view: CostView) -> CostReading {
         switch view {
-        case .codex: return codex
+        case .grandeCodex: return grandeCodex
         case .claude: return claude
         case .total:
-            switch (codex, claude) {
-            case let (.usage(codex), .usage(claude)):
+            switch (grandeCodex, claude) {
+            case let (.usage(grandeCodex), .usage(claude)):
                 return .usage(LocalUsage(
-                    today: codex.today + claude.today,
-                    week: codex.week + claude.week,
-                    month: codex.month + claude.month,
-                    models: Array(Set(codex.models + claude.models)).sorted()
+                    today: grandeCodex.today + claude.today,
+                    week: grandeCodex.week + claude.week,
+                    month: grandeCodex.month + claude.month,
+                    models: Array(Set(grandeCodex.models + claude.models)).sorted()
                 ))
             case (.unavailable, _), (_, .unavailable):
                 return .unavailable
