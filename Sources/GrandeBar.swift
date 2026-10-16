@@ -36,6 +36,7 @@ private enum AppConfig {
     static let appearanceOptions = ["auto", "light", "dark"]
     static let languageKey = "languageMode"
     static let languageOptions = ["auto", "en", "tr"]
+    static let costViewKey = "costView"
 
     static func mode() -> AppMode {
         AppMode(rawValue: UserDefaults.standard.string(forKey: modeKey) ?? "") ?? .codex
@@ -61,6 +62,15 @@ private enum AppConfig {
 
     static func setClaudeTab(_ tab: ClaudeLimitsTab) {
         UserDefaults.standard.set(tab.rawValue, forKey: claudeTabKey)
+    }
+
+    /// The footer's cost view follows the mode until one is picked by clicking the footer.
+    static func costView() -> CostView {
+        CostView.resolved(UserDefaults.standard.string(forKey: costViewKey), claudeMode: mode() == .claude)
+    }
+
+    static func setCostView(_ view: CostView) {
+        UserDefaults.standard.set(view.rawValue, forKey: costViewKey)
     }
 
     static func apiBase() -> String {
@@ -253,6 +263,47 @@ private enum Theme {
     static let claudeAccent = NSColor(calibratedRed: 0.85, green: 0.47, blue: 0.34, alpha: 1)
     static var accent: NSColor { AppConfig.mode() == .claude ? claudeAccent : .systemBlue }
     static var shadow: NSColor { NSColor.black.withAlphaComponent(isDark ? 0.10 : 0.20) }
+}
+
+private extension CostView {
+    var title: String {
+        switch self {
+        case .codex: return "Codex"
+        case .claude: return "Claude"
+        case .total: return L.text("Total", "Toplam")
+        }
+    }
+
+    /// Codex blue and Claude orange as on the mode switch; the total is neutral.
+    var tint: NSColor {
+        switch self {
+        case .codex: return .systemBlue
+        case .claude: return Theme.claudeAccent
+        case .total: return .labelColor
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .codex:
+            return L.text("Codex cost: all Codex homes, GrandeClaudex workers included",
+                          "Codex maliyeti: tüm Codex home'ları, GrandeClaudex worker'ları dahil")
+        case .claude:
+            return L.text("Claude Code cost, GrandeClaudex workers included",
+                          "Claude Code maliyeti, GrandeClaudex worker'ları dahil")
+        case .total:
+            return L.text("Total: Codex + Claude Code cost", "Toplam: Codex + Claude Code maliyeti")
+        }
+    }
+
+    /// Name on the copied summary's cost lines.
+    var summaryName: String {
+        switch self {
+        case .codex: return L.text("Codex cost", "Codex maliyeti")
+        case .claude: return L.text("Claude Code cost", "Claude Code maliyeti")
+        case .total: return L.text("Total cost", "Toplam maliyet")
+        }
+    }
 }
 
 private struct QuotaCard {
@@ -479,7 +530,7 @@ final class QuotaViewController: NSViewController {
     /// Header line is "<summary> · <detail>"; both parts are tracked so either can change alone.
     private var subtitleBase = ""
     private var subtitleDetail: String?
-    private var usageLabel: NSTextField!
+    private var costFooter: CostFooterView!
     private var lastRefreshLabel: NSTextField!
     private var refreshButton: NSButton!
     private var warmButton: NSButton!
@@ -508,7 +559,8 @@ final class QuotaViewController: NSViewController {
     /// Claude Desktop's live account when CLIProxy does not report it; outside the pool totals.
     private var desktopCard: (uuid: String, card: QuotaCard)?
     private var desktopFetchInFlight = false
-    private var latestUsage: LocalUsage?
+    private var localCosts = LocalCosts()
+    private var costReadsInFlight = Set<KeyPath<LocalCosts, CostReading>>()
     /// What the CLIProxy tab shows when it has no pool to list.
     private var cliproxyProblem: String?
     /// Whether GrandeClaudex's gdc is installed, checked again whenever the popover opens; without
@@ -610,27 +662,18 @@ final class QuotaViewController: NSViewController {
         scrollView.borderType = .noBorder
         scrollView.documentView = stackView
 
-        let footerTitle = NSTextField(labelWithString: L.text("Cost", "Maliyet"))
-        footerTitle.font = .systemFont(ofSize: 10, weight: .regular)
-        footerTitle.textColor = Theme.mutedText
-        footerTitle.translatesAutoresizingMaskIntoConstraints = false
-        footerTitle.setContentCompressionResistancePriority(.required, for: .horizontal)
-
         // Not on screen: the refresh age lives in the footer tooltip to keep the footer one line.
         lastRefreshLabel = NSTextField(labelWithString: "")
 
-        usageLabel = NSTextField(labelWithString: usageLineText(nil))
-        usageLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
-        usageLabel.textColor = Theme.secondaryText
-        usageLabel.lineBreakMode = .byTruncatingTail
-        usageLabel.translatesAutoresizingMaskIntoConstraints = false
-        usageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        costFooter = CostFooterView()
+        costFooter.translatesAutoresizingMaskIntoConstraints = false
+        costFooter.onClick = { [weak self] in self?.cycleCostView() }
 
         copyButton = footerIconButton("doc.on.doc", action: #selector(copyUsageTable))
         copyButton.toolTip = L.text("Copy usage summary", "Kullanım özetini kopyala")
 
         [iconTile, title, subtitleLabel, warmButton, refreshButton, openButton, modeTabs, scrollView,
-         footerTitle, usageLabel, copyButton].forEach(root.addSubview)
+         costFooter, copyButton].forEach(root.addSubview)
 
         NSLayoutConstraint.activate([
             iconTile.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
@@ -668,12 +711,11 @@ final class QuotaViewController: NSViewController {
             copyButton.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
             copyButton.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -9),
 
-            footerTitle.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
-            footerTitle.centerYAnchor.constraint(equalTo: copyButton.centerYAnchor),
-
-            usageLabel.leadingAnchor.constraint(equalTo: footerTitle.trailingAnchor, constant: 6),
-            usageLabel.centerYAnchor.constraint(equalTo: copyButton.centerYAnchor),
-            usageLabel.trailingAnchor.constraint(lessThanOrEqualTo: copyButton.leadingAnchor, constant: -4)
+            // The chip's edge lines up with the cards; the copy icon has its own inset.
+            costFooter.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            costFooter.trailingAnchor.constraint(equalTo: copyButton.leadingAnchor),
+            costFooter.centerYAnchor.constraint(equalTo: copyButton.centerYAnchor),
+            costFooter.heightAnchor.constraint(equalToConstant: 19)
         ])
 
         view = root
@@ -681,6 +723,7 @@ final class QuotaViewController: NSViewController {
             lastRefreshAt = saved
         }
         renderIdle()
+        renderCost()
         startElapsedTimer()
         updateLastRefreshLabel()
     }
@@ -818,7 +861,6 @@ final class QuotaViewController: NSViewController {
         lastWarmNewCount = nil
         warmNewClearWorkItem?.cancel()
         latestCards = cardsByMode[mode] ?? []
-        latestUsage = nil
         cliproxyProblem = nil
         onModeChange?()
         reloadViewForAppearance()
@@ -1074,12 +1116,7 @@ final class QuotaViewController: NSViewController {
 
     private func reloadViewForAppearance() {
         let cards = latestCards
-        let usage = latestUsage
         loadView()
-        latestUsage = usage
-        if let usage {
-            usageLabel.stringValue = usageLineText(usage)
-        }
         if !cards.isEmpty {
             render(cards: cards)
         }
@@ -1103,21 +1140,53 @@ final class QuotaViewController: NSViewController {
         }
     }
 
+    /// Both costs are read on every refresh whatever the mode, each on its own so a slow first
+    /// read of one does not hold the other back.
     private func refreshLocalUsage() {
-        let mode = AppConfig.mode()
+        readLocalCost(into: \.codex) { LocalCodexUsage.read() }
+        readLocalCost(into: \.claude) { LocalClaudeUsage.read() }
+    }
+
+    private func readLocalCost(into slot: WritableKeyPath<LocalCosts, CostReading>, read: @escaping () -> LocalUsage?) {
+        // A read still running answers this refresh too.
+        guard costReadsInFlight.insert(slot).inserted else { return }
         DispatchQueue.global(qos: .utility).async {
-            let usage = mode == .claude ? LocalClaudeUsage.read() : LocalCodexUsage.read()
-            DispatchQueue.main.async {
-                guard mode == AppConfig.mode() else { return }
-                if let usage {
-                    self.latestUsage = usage
-                    self.usageLabel.stringValue = self.usageLineText(usage)
-                } else {
-                    self.latestUsage = nil
-                    self.usageLabel.stringValue = L.text("Token cost unavailable", "Token maliyeti hesaplanamadı")
-                }
+            let usage = read()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.costReadsInFlight.remove(slot)
+                self.localCosts[keyPath: slot] = usage.map(CostReading.usage) ?? .unavailable
+                self.renderCost()
             }
         }
+    }
+
+    private func renderCost() {
+        let view = AppConfig.costView()
+        costFooter.show(title: view.title, tint: view.tint, amounts: costLineText(localCosts.reading(for: view)))
+        costFooter.toolTip = costTooltip()
+    }
+
+    private func cycleCostView() {
+        AppConfig.setCostView(AppConfig.costView().next)
+        renderCost()
+    }
+
+    /// Names the cost on screen and the next one; the refresh age stays on the last line.
+    private func costTooltip() -> String {
+        let view = AppConfig.costView()
+        var lines = [view.detail]
+        if view == .total {
+            if case .unavailable = localCosts.codex {
+                lines.append(L.text("Codex cost unavailable", "Codex maliyeti hesaplanamadı"))
+            }
+            if case .unavailable = localCosts.claude {
+                lines.append(L.text("Claude Code cost unavailable", "Claude Code maliyeti hesaplanamadı"))
+            }
+        }
+        lines.append(L.text("Click → \(view.next.title)", "Tıkla → \(view.next.title)"))
+        lines.append(lastRefreshLabel.stringValue)
+        return lines.joined(separator: "\n")
     }
 
     private func renderIdle() {
@@ -1226,7 +1295,7 @@ final class QuotaViewController: NSViewController {
 
     private func updateLastRefreshLabel() {
         defer {
-            usageLabel?.toolTip = lastRefreshLabel.stringValue
+            costFooter?.toolTip = costTooltip()
             copyButton?.toolTip = lastRefreshLabel.stringValue
         }
         guard let lastRefreshAt else {
@@ -1561,16 +1630,7 @@ final class QuotaViewController: NSViewController {
     }
 
     private func usageTableText() -> String {
-        var usageLine = L.text("Token cost unavailable (incomplete usage or missing model price).", "Token maliyeti hesaplanamadı (eksik kullanım veya model fiyatı).")
-        if let usage = latestUsage {
-            let modelsSuffix = usage.models.isEmpty
-                ? ""
-                : L.text(" Models: \(usage.models.joined(separator: ", ")).", " Modeller: \(usage.models.joined(separator: ", ")).")
-            usageLine = L.text(
-                "Token cost: today \(LocalCodexUsage.format(usage.today)), this week \(LocalCodexUsage.format(usage.week)), month to date \(LocalCodexUsage.format(usage.month)).\(modelsSuffix)",
-                "Token cost: bugün \(LocalCodexUsage.format(usage.today)), bu hafta \(LocalCodexUsage.format(usage.week)), ay başından beri \(LocalCodexUsage.format(usage.month)).\(modelsSuffix)"
-            )
-        }
+        let usageLine = CostView.allCases.map(costSummaryLine).joined(separator: "\n")
 
         guard !latestCards.isEmpty else {
             return "\(usageLine)\n\(L.text("Account quota is not loaded yet.", "Hesap kotası henüz yüklenmedi."))"
@@ -1598,15 +1658,42 @@ final class QuotaViewController: NSViewController {
         )
     }
 
-    private func usageLineText(_ usage: LocalUsage?) -> String {
-        guard let usage else {
-            return L.text("Today -- · Week -- · Month --", "Bugün -- · Hafta -- · Ay --")
+    /// Codex, Claude Code and their total each get a line of their own.
+    private func costSummaryLine(_ view: CostView) -> String {
+        let name = view.summaryName
+        switch localCosts.reading(for: view) {
+        case .loading:
+            return L.text("\(name): not read yet.", "\(name): henüz okunmadı.")
+        case .unavailable where view == .total:
+            return L.text("\(name): unavailable (needs both the Codex and the Claude Code cost).",
+                          "\(name): hesaplanamadı (Codex ve Claude Code maliyeti gerekli).")
+        case .unavailable:
+            return L.text("\(name): unavailable (incomplete usage or missing model price).",
+                          "\(name): hesaplanamadı (eksik kullanım veya model fiyatı).")
+        case .usage(let usage):
+            let modelsSuffix = view == .total || usage.models.isEmpty
+                ? ""
+                : L.text(" Models: \(usage.models.joined(separator: ", ")).", " Modeller: \(usage.models.joined(separator: ", ")).")
+            return L.text(
+                "\(name): today \(LocalCodexUsage.format(usage.today)), this week \(LocalCodexUsage.format(usage.week)), month to date \(LocalCodexUsage.format(usage.month)).\(modelsSuffix)",
+                "\(name): bugün \(LocalCodexUsage.format(usage.today)), bu hafta \(LocalCodexUsage.format(usage.week)), ay başından beri \(LocalCodexUsage.format(usage.month)).\(modelsSuffix)"
+            )
         }
-        // Keep footer to costs only so 4–5 digit $ amounts always fit; models go in copy summary.
-        return L.text(
-            "Today \(compactCost(usage.today)) · Week \(compactCost(usage.week)) · Month \(compactCost(usage.month))",
-            "Bugün \(compactCost(usage.today)) · Hafta \(compactCost(usage.week)) · Ay \(compactCost(usage.month))"
-        )
+    }
+
+    private func costLineText(_ reading: CostReading) -> String {
+        switch reading {
+        case .loading:
+            return L.text("Today -- · Week -- · Month --", "Bugün -- · Hafta -- · Ay --")
+        case .unavailable:
+            return L.text("Token cost unavailable", "Token maliyeti hesaplanamadı")
+        case .usage(let usage):
+            // Keep footer to costs only so 4–5 digit $ amounts always fit; models go in copy summary.
+            return L.text(
+                "Today \(compactCost(usage.today)) · Week \(compactCost(usage.week)) · Month \(compactCost(usage.month))",
+                "Bugün \(compactCost(usage.today)) · Hafta \(compactCost(usage.week)) · Ay \(compactCost(usage.month))"
+            )
+        }
     }
 
     /// Footer amounts drop cents from $100 up so four-digit weeks still fit on one line.
@@ -1833,6 +1920,137 @@ private final class ChipView: RoundedView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+}
+
+/// The footer's cost line: a tinted chip naming the cost on screen, then today · week · month.
+/// A click moves to the next view; long amounts step down in size instead of being cut off.
+final class CostFooterView: NSView {
+    var onClick: (() -> Void)?
+    private let chip = NSView()
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let chevron = NSImageView()
+    private let amountsLabel = NSTextField(labelWithString: "")
+    private var tint = NSColor.labelColor
+    private var isHovered = false {
+        didSet { applyColors() }
+    }
+
+    /// The usual 10 pt first; smaller only when five-digit amounts would not fit otherwise.
+    private static let amountSizes: [CGFloat] = [10, 9.5, 9, 8.5]
+
+    init() {
+        super.init(frame: .zero)
+        chip.wantsLayer = true
+        chip.layer?.cornerRadius = 5
+        chip.layer?.cornerCurve = .continuous
+        titleLabel.font = .systemFont(ofSize: 9.5, weight: .semibold)
+        chevron.image = NSImage(systemSymbolName: "chevron.up.chevron.down", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 6.5, weight: .bold))
+        // Not withAlphaComponent: that pins labelColor to the system appearance, not the popover's.
+        chevron.alphaValue = 0.7
+        amountsLabel.lineBreakMode = .byTruncatingTail
+        [titleLabel, chevron, amountsLabel].forEach { $0.setAccessibilityElement(false) }
+        chip.addSubview(titleLabel)
+        chip.addSubview(chevron)
+        addSubview(chip)
+        addSubview(amountsLabel)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self))
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func show(title: String, tint: NSColor, amounts: String) {
+        self.tint = tint
+        titleLabel.stringValue = title
+        amountsLabel.stringValue = amounts
+        applyColors()
+        needsLayout = true
+    }
+
+    /// The amounts' size depends on the width, and the subviews are placed by hand.
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        // fittingSize keeps the 2 pt a label draws inside its frame on each side; the
+        // intrinsic width alone cuts the last digits off.
+        let title = titleLabel.fittingSize
+        let chevronSize = chevron.image?.size ?? .zero
+        let chipHeight: CGFloat = 15
+        titleLabel.frame = NSRect(x: 3, y: round((chipHeight - title.height) / 2), width: ceil(title.width), height: title.height)
+        chevron.frame = NSRect(x: titleLabel.frame.maxX - 1, y: round((chipHeight - chevronSize.height) / 2),
+                               width: ceil(chevronSize.width), height: ceil(chevronSize.height))
+        chip.frame = NSRect(x: 0, y: round((bounds.height - chipHeight) / 2), width: chevron.frame.maxX + 5, height: chipHeight)
+
+        let x = chip.frame.maxX + 4
+        let available = max(0, bounds.width - x)
+        for size in Self.amountSizes {
+            amountsLabel.font = .monospacedDigitSystemFont(ofSize: size, weight: .medium)
+            if amountsLabel.fittingSize.width <= available { break }
+        }
+        let amounts = amountsLabel.fittingSize
+        amountsLabel.frame = NSRect(x: x, y: round((bounds.height - amounts.height) / 2),
+                                    width: min(ceil(amounts.width), available), height: amounts.height)
+    }
+
+    private func applyColors() {
+        titleLabel.textColor = tint
+        chevron.contentTintColor = tint
+        amountsLabel.textColor = isHovered ? Theme.primaryText : Theme.secondaryText
+        // Layer colours do not follow the popover's appearance by themselves.
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            chip.layer?.backgroundColor = tint.withAlphaComponent(isHovered ? 0.24 : 0.14).cgColor
+        }
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyColors()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        frame.contains(point) ? self : nil
+    }
+
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { onClick?() }
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+    }
+
+    override func isAccessibilityElement() -> Bool {
+        true
+    }
+
+    override func accessibilityRole() -> NSAccessibility.Role? {
+        .button
+    }
+
+    override func accessibilityLabel() -> String? {
+        "\(titleLabel.stringValue): \(amountsLabel.stringValue)"
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        onClick?()
+        return onClick != nil
     }
 }
 
