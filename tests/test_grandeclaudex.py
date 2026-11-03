@@ -25,27 +25,30 @@ func window(_ value: GrandeClaudexWindow?) -> Any {
     return ["remaining": value.remainingPercent, "reset": value.resetSeconds ?? NSNull(), "hasReset": value.hasReset] as [String: Any]
 }
 
+func describeWorker(_ worker: GrandeClaudexWorker, now: Date) -> [String: Any] {
+    [
+        "id": worker.id,
+        "alias": worker.alias,
+        "email": worker.email ?? NSNull(),
+        "loggedIn": worker.loggedIn,
+        "plan": worker.planTitle ?? NSNull(),
+        "weeklyModel": worker.weeklyModel ?? NSNull(),
+        "status": worker.status ?? NSNull(),
+        "fiveHour": window(worker.fiveHourWindow(now: now)),
+        "sevenDay": window(worker.sevenDayWindow(now: now)),
+        "sevenDayModel": window(worker.sevenDayModelWindow(now: now)),
+        "sevenDayModelLabel": worker.sevenDayModelLabel ?? NSNull(),
+        "checkedAt": worker.checkedAt?.timeIntervalSince1970 ?? NSNull(),
+        "error": worker.error ?? NSNull()
+    ]
+}
+
 func describe(_ snapshot: GrandeClaudexSnapshot, now: Date) -> [String: Any] {
     [
         "chief": snapshot.chief ?? NSNull(),
+        "chiefUsage": snapshot.chiefUsage.map { describeWorker($0, now: now) } ?? NSNull(),
         "generatedAt": snapshot.generatedAt?.timeIntervalSince1970 ?? NSNull(),
-        "workers": snapshot.workers.map { worker in
-            [
-                "id": worker.id,
-                "alias": worker.alias,
-                "email": worker.email ?? NSNull(),
-                "loggedIn": worker.loggedIn,
-                "plan": worker.planTitle ?? NSNull(),
-                "weeklyModel": worker.weeklyModel ?? NSNull(),
-                "status": worker.status ?? NSNull(),
-                "fiveHour": window(worker.fiveHourWindow(now: now)),
-                "sevenDay": window(worker.sevenDayWindow(now: now)),
-                "sevenDayModel": window(worker.sevenDayModelWindow(now: now)),
-                "sevenDayModelLabel": worker.sevenDayModelLabel ?? NSNull(),
-                "checkedAt": worker.checkedAt?.timeIntervalSince1970 ?? NSNull(),
-                "error": worker.error ?? NSNull()
-            ] as [String: Any]
-        }
+        "workers": snapshot.workers.map { describeWorker($0, now: now) }
     ]
 }
 
@@ -111,8 +114,11 @@ def worker(**overrides):
     return row
 
 
-def payload(*workers):
-    return {"chief": "chief@example.com", "generated_at": "2026-10-15T21:20:41.200794+00:00", "workers": list(workers)}
+def payload(*workers, chief_usage=None):
+    body = {"chief": "chief@example.com", "generated_at": "2026-10-15T21:20:41.200794+00:00", "workers": list(workers)}
+    if chief_usage is not None:
+        body["chief_usage"] = chief_usage
+    return body
 
 
 @unittest.skipUnless(shutil.which("swiftc"), "swiftc is not available")
@@ -207,6 +213,21 @@ class GrandeClaudexTests(unittest.TestCase):
         self.assertIsNone(rows[1]["sevenDayModelLabel"])
         # An elapsed reset makes the model-scoped window full again, like the other windows.
         self.assertEqual(rows[2]["sevenDayModel"], {"remaining": 100, "reset": None, "hasReset": True})
+
+    def test_chief_usage_is_its_own_record(self):
+        chief = worker(id="chief", alias="chief", email="chief@example.com", login_email="chief@example.com",
+                       five_hour=0.4, seven_day=0.14, seven_day_resets_at=NOW + 90_000, seven_day_label="all models",
+                       seven_day_model=0.11, seven_day_model_resets_at=NOW + 90_000, seven_day_model_label="Fable")
+        parsed = self.parse(payload(worker(id="a"), chief_usage=chief))
+        self.assertEqual([w["id"] for w in parsed["workers"]], ["a"])
+        self.assertEqual(parsed["chiefUsage"]["id"], "chief")
+        self.assertEqual(parsed["chiefUsage"]["email"], "chief@example.com")
+        self.assertEqual(parsed["chiefUsage"]["fiveHour"]["remaining"], 60)
+        self.assertEqual(parsed["chiefUsage"]["sevenDay"]["remaining"], 86)
+        self.assertEqual(parsed["chiefUsage"]["sevenDayModel"]["remaining"], 89)
+        # Older gdc output has no chief record, and a Codex chief record is ignored.
+        self.assertIsNone(self.parse(payload(worker(id="a")))["chiefUsage"])
+        self.assertIsNone(self.parse(payload(worker(id="a"), chief_usage=worker(id="chief", kind="codex")))["chiefUsage"])
 
     def test_signed_in_account_wins_over_the_configured_one(self):
         rows = self.parse(payload(

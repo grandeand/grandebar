@@ -74,6 +74,9 @@ extension GrandeClaudexWorker {
 
 struct GrandeClaudexSnapshot: Equatable {
     let chief: String?
+    /// The chief account's own limits (the Mac's default Claude Code login), when gdc reports them
+    /// as `chief_usage`; shown as the first card of the Claudex tab.
+    let chiefUsage: GrandeClaudexWorker?
     let generatedAt: Date?
     let workers: [GrandeClaudexWorker]
 }
@@ -113,32 +116,39 @@ enum GrandeClaudexCLI {
         probe ? 300 : 60
     }
 
-    /// Claude workers only, in gdc's order; Codex workers have no limits UI.
+    /// Claude workers only, in gdc's order, plus the chief's own record; Codex workers have no limits UI.
     static func parse(_ data: Data) -> GrandeClaudexSnapshot? {
         guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let rows = json["workers"] as? [[String: Any]] else { return nil }
-        let workers = rows.compactMap { row -> GrandeClaudexWorker? in
-            guard (row["kind"] as? String) == "claude", let id = nonEmpty(row["id"]) else { return nil }
-            return GrandeClaudexWorker(
-                id: id,
-                alias: nonEmpty(row["alias"]) ?? id,
-                email: nonEmpty(row["login_email"]) ?? nonEmpty(row["email"]),
-                loggedIn: flag(row["logged_in"]),
-                plan: nonEmpty(row["plan"]),
-                status: nonEmpty(row["status"]),
-                fiveHour: fraction(row["five_hour"]),
-                fiveHourResetsAt: epoch(row["five_hour_resets_at"]),
-                sevenDay: fraction(row["seven_day"]),
-                sevenDayResetsAt: epoch(row["seven_day_resets_at"]),
-                sevenDayLabel: nonEmpty(row["seven_day_label"]),
-                sevenDayModel: fraction(row["seven_day_model"]),
-                sevenDayModelResetsAt: epoch(row["seven_day_model_resets_at"]),
-                sevenDayModelLabel: nonEmpty(row["seven_day_model_label"]),
-                checkedAt: date(row["checked_at"]),
-                error: nonEmpty(row["error"])
-            )
-        }
-        return GrandeClaudexSnapshot(chief: nonEmpty(json["chief"]), generatedAt: date(json["generated_at"]), workers: workers)
+        return GrandeClaudexSnapshot(
+            chief: nonEmpty(json["chief"]),
+            chiefUsage: (json["chief_usage"] as? [String: Any]).flatMap(worker(from:)),
+            generatedAt: date(json["generated_at"]),
+            workers: rows.compactMap(worker(from:))
+        )
+    }
+
+    /// One `usage --json` record; nil for a Codex worker or a row without an id.
+    private static func worker(from row: [String: Any]) -> GrandeClaudexWorker? {
+        guard (row["kind"] as? String) == "claude", let id = nonEmpty(row["id"]) else { return nil }
+        return GrandeClaudexWorker(
+            id: id,
+            alias: nonEmpty(row["alias"]) ?? id,
+            email: nonEmpty(row["login_email"]) ?? nonEmpty(row["email"]),
+            loggedIn: flag(row["logged_in"]),
+            plan: nonEmpty(row["plan"]),
+            status: nonEmpty(row["status"]),
+            fiveHour: fraction(row["five_hour"]),
+            fiveHourResetsAt: epoch(row["five_hour_resets_at"]),
+            sevenDay: fraction(row["seven_day"]),
+            sevenDayResetsAt: epoch(row["seven_day_resets_at"]),
+            sevenDayLabel: nonEmpty(row["seven_day_label"]),
+            sevenDayModel: fraction(row["seven_day_model"]),
+            sevenDayModelResetsAt: epoch(row["seven_day_model_resets_at"]),
+            sevenDayModelLabel: nonEmpty(row["seven_day_model_label"]),
+            checkedAt: date(row["checked_at"]),
+            error: nonEmpty(row["error"])
+        )
     }
 
     /// `gdc usage --json`, or with `probe` `gdc usage --json --probe`, which reads every worker's

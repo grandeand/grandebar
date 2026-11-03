@@ -5208,8 +5208,8 @@ extension QuotaViewController {
         label.translatesAutoresizingMaskIntoConstraints = false
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let probe = iconButton("arrow.clockwise", action: #selector(probeClaudex))
-        probe.toolTip = L.text("Read every worker's limits now (Claude Code's /usage, no model call)",
-                               "Tüm worker limitlerini şimdi oku (Claude Code /usage, model çağrısı yok)")
+        probe.toolTip = L.text("Read the chief's and every worker's limits now (Claude Code's /usage, no model call)",
+                               "Şefin ve tüm worker'ların limitlerini şimdi oku (Claude Code /usage, model çağrısı yok)")
         header.addSubview(label)
         header.addSubview(probe)
         NSLayoutConstraint.activate([
@@ -5227,11 +5227,13 @@ extension QuotaViewController {
         guard let snapshot = claudex else {
             return claudexProblem.map { [header, makeErrorBox($0)] } ?? [header]
         }
-        guard !snapshot.workers.isEmpty else {
+        guard !snapshot.workers.isEmpty || snapshot.chiefUsage != nil else {
             return [header, makeInfoBox(L.text("GrandeClaudex reports no Claude workers.", "GrandeClaudex hiç Claude worker'ı bildirmiyor."))]
         }
+        // The chief (this Mac's own Claude Code login) comes first, then the workers in gdc's order.
         let now = Date()
-        return [header, AccountsGroupView(cards: snapshot.workers.map { claudexCard($0, now: now) })]
+        let chief = snapshot.chiefUsage.map { [claudexCard($0, now: now, isChief: true)] } ?? []
+        return [header, AccountsGroupView(cards: chief + snapshot.workers.map { claudexCard($0, now: now) })]
     }
 
     /// Updates the status line in place, so starting a probe does not rebuild the cards.
@@ -5247,8 +5249,14 @@ extension QuotaViewController {
             failed = true
         } else if let snapshot = claudex {
             let signedIn = snapshot.workers.filter(\.loggedIn).count
-            text = L.text("\(snapshot.workers.count) Claude workers · \(signedIn) signed in",
-                          "\(snapshot.workers.count) Claude worker · \(signedIn) oturum açık")
+            if let chief = snapshot.chiefUsage {
+                let total = signedIn + (chief.loggedIn ? 1 : 0)
+                text = L.text("Chief + \(snapshot.workers.count) Claude workers · \(total) signed in",
+                              "Şef + \(snapshot.workers.count) Claude worker · \(total) oturum açık")
+            } else {
+                text = L.text("\(snapshot.workers.count) Claude workers · \(signedIn) signed in",
+                              "\(snapshot.workers.count) Claude worker · \(signedIn) oturum açık")
+            }
         } else if claudexInFlight {
             text = L.text("Reading GrandeClaudex…", "GrandeClaudex okunuyor…")
         } else {
@@ -5260,24 +5268,26 @@ extension QuotaViewController {
     }
 
     /// A worker as a Desktop account card: email, "<plan> · <alias>" chip, the 5h row and the
-    /// weekly one named like Desktop's, and when gdc last read it.
-    private func claudexCard(_ worker: GrandeClaudexWorker, now: Date) -> QuotaCard {
+    /// weekly one named like Desktop's, and when gdc last read it. The chief's card is the same
+    /// with "Chief" in place of the alias.
+    private func claudexCard(_ worker: GrandeClaudexWorker, now: Date, isChief: Bool = false) -> QuotaCard {
+        let alias = isChief ? L.text("Chief", "Şef") : worker.alias
         let session = worker.loggedIn ? worker.fiveHourWindow(now: now) : nil
         let weekly = worker.loggedIn ? worker.sevenDayWindow(now: now) : nil
         let modelWeekly = worker.loggedIn ? worker.sevenDayModelWindow(now: now) : nil
         let note: String
         if !worker.loggedIn {
-            note = L.text("\(worker.alias) · not logged in", "\(worker.alias) · oturum açık değil")
+            note = L.text("\(alias) · not logged in", "\(alias) · oturum açık değil")
         } else if let error = worker.error {
-            note = L.text("\(worker.alias) · read failed: \(error)", "\(worker.alias) · okunamadı: \(error)")
+            note = L.text("\(alias) · read failed: \(error)", "\(alias) · okunamadı: \(error)")
         } else if let checkedAt = worker.checkedAt {
-            note = lastReadNote(worker.alias, at: checkedAt, resetSince: session?.hasReset == true || weekly?.hasReset == true || modelWeekly?.hasReset == true)
+            note = lastReadNote(alias, at: checkedAt, resetSince: session?.hasReset == true || weekly?.hasReset == true || modelWeekly?.hasReset == true)
         } else {
-            note = L.text("\(worker.alias) · not read yet", "\(worker.alias) · henüz okunmadı")
+            note = L.text("\(alias) · not read yet", "\(alias) · henüz okunmadı")
         }
         let plan = worker.planTitle ?? "Claudex"
         return QuotaCard(
-            name: worker.email ?? worker.alias, plan: plan,
+            name: worker.email ?? alias, plan: plan,
             sessionPercent: session?.remainingPercent, sessionResetSeconds: session?.resetSeconds,
             weeklyPercent: weekly?.remainingPercent, weeklyResetSeconds: weekly?.resetSeconds,
             resetCreditsAvailableCount: nil, resetCreditExpiries: [],
@@ -5285,7 +5295,7 @@ extension QuotaViewController {
             weeklyLabel: worker.weeklyModel,
             modelWeeklyLabel: modelWeekly == nil ? nil : worker.sevenDayModelLabel,
             modelWeeklyPercent: modelWeekly?.remainingPercent, modelWeeklyResetSeconds: modelWeekly?.resetSeconds,
-            headline: "\(plan) · \(worker.alias)",
+            headline: "\(plan) · \(alias)",
             note: note
         )
     }
