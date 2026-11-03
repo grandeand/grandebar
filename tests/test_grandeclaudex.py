@@ -40,6 +40,8 @@ func describe(_ snapshot: GrandeClaudexSnapshot, now: Date) -> [String: Any] {
                 "status": worker.status ?? NSNull(),
                 "fiveHour": window(worker.fiveHourWindow(now: now)),
                 "sevenDay": window(worker.sevenDayWindow(now: now)),
+                "sevenDayModel": window(worker.sevenDayModelWindow(now: now)),
+                "sevenDayModelLabel": worker.sevenDayModelLabel ?? NSNull(),
                 "checkedAt": worker.checkedAt?.timeIntervalSince1970 ?? NSNull(),
                 "error": worker.error ?? NSNull()
             ] as [String: Any]
@@ -99,6 +101,9 @@ def worker(**overrides):
         "seven_day": None,
         "seven_day_resets_at": None,
         "seven_day_label": None,
+        "seven_day_model": None,
+        "seven_day_model_resets_at": None,
+        "seven_day_model_label": None,
         "checked_at": "2026-10-15T21:04:55.647396+00:00",
         "error": None,
     }
@@ -186,6 +191,22 @@ class GrandeClaudexTests(unittest.TestCase):
         ))["workers"]
         self.assertEqual([(r["plan"], r["weeklyModel"]) for r in rows], [("Team", "Fable"), ("Max", None), (None, None)])
         self.assertEqual(rows[0]["sevenDay"], {"remaining": 72, "reset": 90_000, "hasReset": False})
+
+    def test_model_scoped_weekly_next_to_the_general_one(self):
+        rows = self.parse(payload(
+            worker(id="a", seven_day=0.14, seven_day_resets_at=NOW + 90_000, seven_day_label="all models",
+                   seven_day_model=0.11, seven_day_model_resets_at=NOW + 90_000, seven_day_model_label="Fable"),
+            worker(id="b", seven_day=0.2, seven_day_resets_at=NOW + 90_000, seven_day_label="all models"),
+            worker(id="c", seven_day=0.3, seven_day_resets_at=NOW + 90_000, seven_day_label="all models",
+                   seven_day_model=0.9, seven_day_model_resets_at=NOW - 60, seven_day_model_label="Fable"),
+        ))["workers"]
+        self.assertEqual(rows[0]["sevenDay"], {"remaining": 86, "reset": 90_000, "hasReset": False})
+        self.assertEqual(rows[0]["sevenDayModel"], {"remaining": 89, "reset": 90_000, "hasReset": False})
+        self.assertEqual(rows[0]["sevenDayModelLabel"], "Fable")
+        self.assertIsNone(rows[1]["sevenDayModel"])
+        self.assertIsNone(rows[1]["sevenDayModelLabel"])
+        # An elapsed reset makes the model-scoped window full again, like the other windows.
+        self.assertEqual(rows[2]["sevenDayModel"], {"remaining": 100, "reset": None, "hasReset": True})
 
     def test_signed_in_account_wins_over_the_configured_one(self):
         rows = self.parse(payload(

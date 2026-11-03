@@ -329,6 +329,11 @@ private struct QuotaCard {
     let updatedAt: Date
     /// Claude: label for the weekly row (e.g. "Fable" when only a model-scoped weekly limit exists).
     var weeklyLabel: String? = nil
+    /// Claude: the model-scoped weekly limit (e.g. "Fable") shown as a third row under the general
+    /// weekly one; nil when the account has no second weekly limit.
+    var modelWeeklyLabel: String? = nil
+    var modelWeeklyPercent: Int? = nil
+    var modelWeeklyResetSeconds: Int? = nil
     /// Claude: replaces the Codex reset-credit lines on the card's top right.
     var headline: String? = nil
     var subline: String? = nil
@@ -347,6 +352,12 @@ private struct QuotaCard {
     /// "Fable" weekly) does not: other models keep working on the same 5h window.
     var usableSessionPercent: Int? {
         weeklyLabel == nil && weeklyPercent == 0 ? 0 : sessionPercent
+    }
+
+    /// The weekly limit for all models only: nil when the weekly row holds a model-scoped limit
+    /// (Fable), so the menu bar never shows that one as the weekly value.
+    var generalWeeklyPercent: Int? {
+        weeklyLabel == nil ? weeklyPercent : nil
     }
 }
 
@@ -367,6 +378,10 @@ private struct TotalLimitSummary {
     let sessionTotal: Int?
     let weeklyRemaining: Int?
     let weeklyTotal: Int?
+    /// The model-scoped weekly pool (Fable); nil while no account reports a second weekly limit.
+    let modelWeeklyLabel: String?
+    let modelWeeklyRemaining: Int?
+    let modelWeeklyTotal: Int?
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
@@ -1504,8 +1519,8 @@ final class QuotaViewController: NSViewController {
     }
 
     private func sortCards(_ lhs: QuotaCard, _ rhs: QuotaCard) -> Bool {
-        let left = min(lhs.sessionPercent ?? 101, lhs.weeklyPercent ?? 101)
-        let right = min(rhs.sessionPercent ?? 101, rhs.weeklyPercent ?? 101)
+        let left = min(lhs.sessionPercent ?? 101, lhs.weeklyPercent ?? 101, lhs.modelWeeklyPercent ?? 101)
+        let right = min(rhs.sessionPercent ?? 101, rhs.weeklyPercent ?? 101, rhs.modelWeeklyPercent ?? 101)
         if left != right { return left < right }
         return lhs.name < rhs.name
     }
@@ -1604,11 +1619,16 @@ final class QuotaViewController: NSViewController {
             return card.usableSessionPercent
         }
         let weeklies = cards.compactMap(\.weeklyPercent)
+        let modelWeeklies = cards.compactMap(\.modelWeeklyPercent)
+        let modelLabels = Set(cards.compactMap(\.modelWeeklyLabel))
         return TotalLimitSummary(
             sessionRemaining: sessions.isEmpty ? nil : sessions.reduce(0, +),
             sessionTotal: sessions.isEmpty ? nil : sessions.count * 100,
             weeklyRemaining: weeklies.isEmpty ? nil : weeklies.reduce(0, +),
-            weeklyTotal: weeklies.isEmpty ? nil : weeklies.count * 100
+            weeklyTotal: weeklies.isEmpty ? nil : weeklies.count * 100,
+            modelWeeklyLabel: modelLabels.isEmpty ? nil : modelLabels.sorted().joined(separator: "/"),
+            modelWeeklyRemaining: modelWeeklies.isEmpty ? nil : modelWeeklies.reduce(0, +),
+            modelWeeklyTotal: modelWeeklies.isEmpty ? nil : modelWeeklies.count * 100
         )
     }
 
@@ -1624,10 +1644,16 @@ final class QuotaViewController: NSViewController {
     /// Claude mode shows the account Claude is signed into on claude.ai; through CLIProxy (or for
     /// an account GrandeBar has no quota for) it shows the whole pool, as Codex mode does.
     private func updateStatusItem(cards: [QuotaCard], summary: TotalLimitSummary) {
-        let lines = displayCards(cards).map { "\($0.name): \($0.sessionPercent.map(String.init) ?? "--")% session, \($0.weeklyPercent.map(String.init) ?? "--")% weekly" }
+        let lines = displayCards(cards).map { card -> String in
+            let line = "\(card.name): \(card.sessionPercent.map(String.init) ?? "--")% session, \(card.weeklyPercent.map(String.init) ?? "--")% weekly"
+            guard let label = card.modelWeeklyLabel else { return line }
+            return line + ", \(card.modelWeeklyPercent.map(String.init) ?? "--")% \(label)"
+        }
         if AppConfig.mode() == .claude, let active = activeClaudeCard(in: cards) {
+            // Second line: the weekly limit for all models, never the Fable one.
             let session = active.card.usableSessionPercent
-            let title = "\(paddedMenuBarPercent(session.map { "\($0)%" } ?? "--%"))\n\(paddedMenuBarPercent(active.card.weeklyPercent.map { "\($0)%" } ?? "--%"))"
+            let weekly = active.card.generalWeeklyPercent
+            let title = "\(paddedMenuBarPercent(session.map { "\($0)%" } ?? "--%"))\n\(paddedMenuBarPercent(weekly.map { "\($0)%" } ?? "--%"))"
             let header = L.text("Active: \(active.card.name) (\(active.client), claude.ai)", "Aktif: \(active.card.name) (\(active.client), claude.ai)")
             statusUpdate(title, ([header] + lines).joined(separator: "\n"))
         } else {
@@ -1670,14 +1696,19 @@ final class QuotaViewController: NSViewController {
 
         let summary = totalLimitSummary(for: latestCards)
         let weeklyTotal = poolPercentText(remaining: summary.weeklyRemaining, total: summary.weeklyTotal)
+        // The model-scoped weekly (Fable) follows the weekly values wherever an account has one.
+        let modelTotal = summary.modelWeeklyLabel.map { ", \($0) \(poolPercentText(remaining: summary.modelWeeklyRemaining, total: summary.modelWeeklyTotal))" } ?? ""
         let accounts = latestCards
             .sorted(by: sortCards)
-            .map { "- \(compactAccountName($0.name)): \(L.text("session", "oturum")) \(percentText($0.sessionPercent)), \(L.text("weekly", "haftalık")) \(percentText($0.weeklyPercent))" }
+            .map { card -> String in
+                let model = card.modelWeeklyLabel.map { ", \($0) \(percentText(card.modelWeeklyPercent))" } ?? ""
+                return "- \(compactAccountName(card.name)): \(L.text("session", "oturum")) \(percentText(card.sessionPercent)), \(L.text("weekly", "haftalık")) \(percentText(card.weeklyPercent))\(model)"
+            }
             .joined(separator: "\n")
         if AppConfig.mode() == .claude {
             return L.text(
-                "\(usageLine)\nClaude remaining total: session \(sessionPoolTitle(summary)), weekly \(weeklyTotal).\nAccount remaining:\n\(accounts)",
-                "\(usageLine)\nClaude toplam kalan: oturum \(sessionPoolTitle(summary)), haftalık \(weeklyTotal).\nHesaplarda kalan:\n\(accounts)"
+                "\(usageLine)\nClaude remaining total: session \(sessionPoolTitle(summary)), weekly \(weeklyTotal)\(modelTotal).\nAccount remaining:\n\(accounts)",
+                "\(usageLine)\nClaude toplam kalan: oturum \(sessionPoolTitle(summary)), haftalık \(weeklyTotal)\(modelTotal).\nHesaplarda kalan:\n\(accounts)"
             )
         }
         let resetTotal = latestCards.compactMap(\.resetCreditsAvailableCount).reduce(0, +)
@@ -1867,6 +1898,14 @@ private final class AccountCardView: NSView {
 
         let session = MetricView(title: L.text("5h", "5 saat"), percent: card.sessionPercent, resetSeconds: card.sessionResetSeconds)
         let weekly = MetricView(title: card.weeklyLabel ?? L.text("Weekly", "Haftalık"), percent: card.weeklyPercent, resetSeconds: card.weeklyResetSeconds)
+        // The model-scoped weekly limit (Fable) sits under the general weekly one as a third row.
+        let modelWeekly = card.modelWeeklyLabel.map { label -> MetricView in
+            weekly.toolTip = L.text("Weekly limit · all models", "Haftalık sınır · tüm modeller")
+            let row = MetricView(title: label, percent: card.modelWeeklyPercent, resetSeconds: card.modelWeeklyResetSeconds)
+            row.toolTip = L.text("Weekly limit · \(label)", "Haftalık sınır · \(label)")
+            return row
+        }
+        let rows = [session, weekly] + (modelWeekly.map { [$0] } ?? [])
 
         let footer = NSTextField(labelWithString: footerText(card))
         footer.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
@@ -1875,9 +1914,9 @@ private final class AccountCardView: NSView {
         footer.toolTip = card.note
         footer.translatesAutoresizingMaskIntoConstraints = false
 
-        [name, chip, session, weekly, footer].forEach(addSubview)
+        ([name, chip, footer] + rows).forEach(addSubview)
 
-        NSLayoutConstraint.activate([
+        var constraints = [
             name.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             name.topAnchor.constraint(equalTo: topAnchor, constant: 11),
             name.trailingAnchor.constraint(lessThanOrEqualTo: chip.leadingAnchor, constant: -8),
@@ -1885,19 +1924,21 @@ private final class AccountCardView: NSView {
             chip.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             chip.centerYAnchor.constraint(equalTo: name.centerYAnchor),
 
-            session.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            session.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            session.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 9),
-
-            weekly.leadingAnchor.constraint(equalTo: session.leadingAnchor),
-            weekly.trailingAnchor.constraint(equalTo: session.trailingAnchor),
-            weekly.topAnchor.constraint(equalTo: session.bottomAnchor, constant: 4),
-
             footer.leadingAnchor.constraint(equalTo: session.leadingAnchor),
             footer.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
-            footer.topAnchor.constraint(equalTo: weekly.bottomAnchor, constant: 6),
+            footer.topAnchor.constraint(equalTo: rows[rows.count - 1].bottomAnchor, constant: 6),
             footer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -11)
-        ])
+        ]
+        for (index, row) in rows.enumerated() {
+            constraints += [
+                row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+                row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+                index == 0
+                    ? row.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 9)
+                    : row.topAnchor.constraint(equalTo: rows[index - 1].bottomAnchor, constant: 4)
+            ]
+        }
+        NSLayoutConstraint.activate(constraints)
     }
 
     required init?(coder: NSCoder) {
@@ -2105,28 +2146,41 @@ private final class TotalLimitCardView: RoundedView {
         super.init(color: Theme.cardBackground, radius: 10)
         translatesAutoresizingMaskIntoConstraints = false
 
-        let session = TotalMetricView(
-            title: L.text("Session pool", "Oturum havuzu"),
-            percent: Self.percent(remaining: summary.sessionRemaining, total: summary.sessionTotal)
-        )
-        let weekly = TotalMetricView(
-            title: weeklyTitle ?? L.text("Weekly pool", "Haftalık havuz"),
-            percent: Self.percent(remaining: summary.weeklyRemaining, total: summary.weeklyTotal)
-        )
-        addSubview(session)
-        addSubview(weekly)
+        var metrics = [
+            TotalMetricView(
+                title: L.text("Session pool", "Oturum havuzu"),
+                percent: Self.percent(remaining: summary.sessionRemaining, total: summary.sessionTotal)
+            ),
+            TotalMetricView(
+                title: weeklyTitle ?? L.text("Weekly pool", "Haftalık havuz"),
+                percent: Self.percent(remaining: summary.weeklyRemaining, total: summary.weeklyTotal)
+            )
+        ]
+        // The model-scoped weekly pool (Fable) as a third, equally wide column.
+        if let label = summary.modelWeeklyLabel {
+            metrics.append(TotalMetricView(
+                title: L.text("\(label) pool", "\(label) havuzu"),
+                percent: Self.percent(remaining: summary.modelWeeklyRemaining, total: summary.modelWeeklyTotal)
+            ))
+        }
+        metrics.forEach(addSubview)
 
-        NSLayoutConstraint.activate([
-            session.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-            session.topAnchor.constraint(equalTo: topAnchor, constant: 11),
-            session.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
-
-            weekly.leadingAnchor.constraint(equalTo: session.trailingAnchor, constant: 16),
-            weekly.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            weekly.topAnchor.constraint(equalTo: session.topAnchor),
-            weekly.bottomAnchor.constraint(equalTo: session.bottomAnchor),
-            session.widthAnchor.constraint(equalTo: weekly.widthAnchor)
-        ])
+        let spacing: CGFloat = metrics.count > 2 ? 12 : 16
+        var constraints: [NSLayoutConstraint] = [
+            metrics[0].leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            metrics[0].topAnchor.constraint(equalTo: topAnchor, constant: 11),
+            metrics[0].bottomAnchor.constraint(equalTo: bottomAnchor, constant: -12),
+            metrics[metrics.count - 1].trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12)
+        ]
+        for (index, metric) in metrics.enumerated().dropFirst() {
+            constraints += [
+                metric.leadingAnchor.constraint(equalTo: metrics[index - 1].trailingAnchor, constant: spacing),
+                metric.topAnchor.constraint(equalTo: metrics[0].topAnchor),
+                metric.bottomAnchor.constraint(equalTo: metrics[0].bottomAnchor),
+                metric.widthAnchor.constraint(equalTo: metrics[0].widthAnchor)
+            ]
+        }
+        NSLayoutConstraint.activate(constraints)
     }
 
     required init?(coder: NSCoder) {
@@ -3483,6 +3537,9 @@ private final class QuotaAPI {
                         limitReached: quota.limitReached,
                         updatedAt: Date(),
                         weeklyLabel: quota.weeklyLabel,
+                        modelWeeklyLabel: quota.modelWeeklyLabel,
+                        modelWeeklyPercent: quota.modelWeeklyRemaining,
+                        modelWeeklyResetSeconds: quota.modelWeeklyResetSeconds,
                         headline: "\(plan) · Proxy",
                         subline: quota.weeklyResetDate.map(ClaudeAPI.formatDate) ?? "--"
                     )
@@ -3771,6 +3828,10 @@ private enum DesktopUsageCache {
         var sessionResetAt: Date?
         var weeklyPercent: Int?
         var weeklyResetAt: Date?
+        // Added later; a stored read without them decodes with nil.
+        var modelWeeklyLabel: String?
+        var modelWeeklyPercent: Int?
+        var modelWeeklyResetAt: Date?
         var fetchedAt: Date
     }
 
@@ -3783,6 +3844,9 @@ private enum DesktopUsageCache {
             sessionResetAt: card.sessionResetSeconds.map { card.updatedAt.addingTimeInterval(TimeInterval($0)) },
             weeklyPercent: card.weeklyPercent,
             weeklyResetAt: card.weeklyResetSeconds.map { card.updatedAt.addingTimeInterval(TimeInterval($0)) },
+            modelWeeklyLabel: card.modelWeeklyLabel,
+            modelWeeklyPercent: card.modelWeeklyPercent,
+            modelWeeklyResetAt: card.modelWeeklyResetSeconds.map { card.updatedAt.addingTimeInterval(TimeInterval($0)) },
             fetchedAt: card.updatedAt
         )
         if let data = try? JSONEncoder().encode(entries) {
@@ -3800,6 +3864,7 @@ private enum DesktopUsageCache {
         }
         let session = project(entry.sessionPercent, entry.sessionResetAt)
         let weekly = project(entry.weeklyPercent, entry.weeklyResetAt)
+        let modelWeekly = project(entry.modelWeeklyPercent, entry.modelWeeklyResetAt)
         return QuotaCard(
             name: entry.name, plan: entry.plan,
             sessionPercent: session.percent, sessionResetSeconds: session.seconds,
@@ -3807,10 +3872,13 @@ private enum DesktopUsageCache {
             resetCreditsAvailableCount: nil, resetCreditExpiries: [],
             allowed: nil, limitReached: nil, updatedAt: now,
             weeklyLabel: entry.weeklyLabel,
+            modelWeeklyLabel: entry.modelWeeklyLabel,
+            modelWeeklyPercent: modelWeekly.percent,
+            modelWeeklyResetSeconds: modelWeekly.seconds,
             headline: entry.headline,
             subline: entry.subline,
             stale: true,
-            note: note?(entry.fetchedAt, session.reset || weekly.reset)
+            note: note?(entry.fetchedAt, session.reset || weekly.reset || modelWeekly.reset)
         )
     }
 
@@ -3880,6 +3948,9 @@ private enum DesktopUsage {
                 resetCreditsAvailableCount: nil, resetCreditExpiries: [],
                 allowed: nil, limitReached: quota.limitReached, updatedAt: Date(),
                 weeklyLabel: quota.weeklyLabel,
+                modelWeeklyLabel: quota.modelWeeklyLabel,
+                modelWeeklyPercent: quota.modelWeeklyRemaining,
+                modelWeeklyResetSeconds: quota.modelWeeklyResetSeconds,
                 headline: "\(plan) · Desktop",
                 subline: quota.weeklyResetDate.map(ClaudeAPI.formatDate) ?? "--"
             )
@@ -3972,7 +4043,7 @@ private enum DesktopUsage {
 
 /// Remaining percentages from `/api/oauth/usage`. Prefers the `limits` array (percent = used)
 /// and falls back to the per-window fields (utilization = used).
-private struct ClaudeQuota {
+struct ClaudeQuota {
     var sessionRemaining: Int?
     var sessionResetSeconds: Int?
     var weeklyRemaining: Int?
@@ -3980,6 +4051,12 @@ private struct ClaudeQuota {
     var weeklyResetDate: Date?
     /// nil for the general weekly limit; the model name for a model-scoped one.
     var weeklyLabel: String?
+    /// The model-scoped weekly limit (Fable) next to the general one. nil when the account has a
+    /// single weekly limit, which is then the weekly row whatever its scope.
+    var modelWeeklyLabel: String?
+    var modelWeeklyRemaining: Int?
+    var modelWeeklyResetSeconds: Int?
+    var modelWeeklyResetDate: Date?
     var limitReached = false
 
     static func parse(_ usage: [String: Any]) -> ClaudeQuota {
@@ -4007,19 +4084,29 @@ private struct ClaudeQuota {
         }
         session = session ?? legacy("five_hour")
         general = general ?? legacy("seven_day")
-        if scoped.isEmpty, let fable = legacy("seven_day_fable") {
-            scoped.append(("Fable", fable))
+        if scoped.isEmpty {
+            for model in ["fable", "opus", "sonnet", "haiku"] {
+                if let window = legacy("seven_day_\(model)") { scoped.append((model.capitalized, window)) }
+            }
         }
 
         var quota = ClaudeQuota()
         quota.sessionRemaining = session?.remaining
         quota.sessionResetSeconds = session?.resets.map { max(0, Int($0.timeIntervalSinceNow)) }
+        let model = scoped.first(where: { $0.label.lowercased().contains("fable") }) ?? scoped.first
         let weekly: Window?
         if let general {
             weekly = general
-        } else if let pick = scoped.first(where: { $0.label.lowercased().contains("fable") }) ?? scoped.first {
-            weekly = pick.window
-            quota.weeklyLabel = pick.label
+            // Both weekly limits: the general one is the weekly row, the model-scoped one the third row.
+            if let model {
+                quota.modelWeeklyLabel = model.label
+                quota.modelWeeklyRemaining = model.window.remaining
+                quota.modelWeeklyResetDate = model.window.resets
+                quota.modelWeeklyResetSeconds = model.window.resets.map { max(0, Int($0.timeIntervalSinceNow)) }
+            }
+        } else if let model {
+            weekly = model.window
+            quota.weeklyLabel = model.label
         } else {
             weekly = nil
         }
@@ -5177,13 +5264,14 @@ extension QuotaViewController {
     private func claudexCard(_ worker: GrandeClaudexWorker, now: Date) -> QuotaCard {
         let session = worker.loggedIn ? worker.fiveHourWindow(now: now) : nil
         let weekly = worker.loggedIn ? worker.sevenDayWindow(now: now) : nil
+        let modelWeekly = worker.loggedIn ? worker.sevenDayModelWindow(now: now) : nil
         let note: String
         if !worker.loggedIn {
             note = L.text("\(worker.alias) · not logged in", "\(worker.alias) · oturum açık değil")
         } else if let error = worker.error {
             note = L.text("\(worker.alias) · read failed: \(error)", "\(worker.alias) · okunamadı: \(error)")
         } else if let checkedAt = worker.checkedAt {
-            note = lastReadNote(worker.alias, at: checkedAt, resetSince: session?.hasReset == true || weekly?.hasReset == true)
+            note = lastReadNote(worker.alias, at: checkedAt, resetSince: session?.hasReset == true || weekly?.hasReset == true || modelWeekly?.hasReset == true)
         } else {
             note = L.text("\(worker.alias) · not read yet", "\(worker.alias) · henüz okunmadı")
         }
@@ -5195,6 +5283,8 @@ extension QuotaViewController {
             resetCreditsAvailableCount: nil, resetCreditExpiries: [],
             allowed: nil, limitReached: nil, updatedAt: now,
             weeklyLabel: worker.weeklyModel,
+            modelWeeklyLabel: modelWeekly == nil ? nil : worker.sevenDayModelLabel,
+            modelWeeklyPercent: modelWeekly?.remainingPercent, modelWeeklyResetSeconds: modelWeekly?.resetSeconds,
             headline: "\(plan) · \(worker.alias)",
             note: note
         )
@@ -5377,7 +5467,11 @@ extension QuotaViewController {
                 if let email = account.email, email != account.alias { details.append(email) }
                 let usage = account.accountUUID == desktopCard?.uuid ? currentDesktopCard : nil
                 if let card = usage ?? DesktopUsageCache.card(for: account.accountUUID) {
-                    details.append("5h \(card.sessionPercent.map { "\($0)%" } ?? "--") · \(card.weeklyLabel ?? L.text("week", "hafta")) \(card.weeklyPercent.map { "\($0)%" } ?? "--")")
+                    var limits = "5h \(card.sessionPercent.map { "\($0)%" } ?? "--") · \(card.weeklyLabel ?? L.text("week", "hafta")) \(card.weeklyPercent.map { "\($0)%" } ?? "--")"
+                    if let label = card.modelWeeklyLabel {
+                        limits += " · \(label) \(card.modelWeeklyPercent.map { "\($0)%" } ?? "--")"
+                    }
+                    details.append(limits)
                 }
                 if !details.isEmpty {
                     let title = NSMutableAttributedString(string: account.alias, attributes: [.font: NSFont.menuFont(ofSize: 0)])

@@ -17,6 +17,10 @@ struct GrandeClaudexWorker: Equatable {
     let sevenDayResetsAt: Date?
     /// "all models" for the general weekly limit, the model (e.g. "Fable") for a model-scoped one.
     let sevenDayLabel: String?
+    /// The model-scoped weekly limit gdc reports next to the general one (`seven_day_model*`).
+    let sevenDayModel: Double?
+    let sevenDayModelResetsAt: Date?
+    let sevenDayModelLabel: String?
     let checkedAt: Date?
     let error: String?
 }
@@ -49,6 +53,10 @@ extension GrandeClaudexWorker {
 
     func sevenDayWindow(now: Date = Date()) -> GrandeClaudexWindow? {
         GrandeClaudexWindow(used: sevenDay, resetsAt: sevenDayResetsAt, now: now)
+    }
+
+    func sevenDayModelWindow(now: Date = Date()) -> GrandeClaudexWindow? {
+        GrandeClaudexWindow(used: sevenDayModel, resetsAt: sevenDayModelResetsAt, now: now)
     }
 
     /// The plan as the Desktop chip writes it: "team" → "Team".
@@ -123,6 +131,9 @@ enum GrandeClaudexCLI {
                 sevenDay: fraction(row["seven_day"]),
                 sevenDayResetsAt: epoch(row["seven_day_resets_at"]),
                 sevenDayLabel: nonEmpty(row["seven_day_label"]),
+                sevenDayModel: fraction(row["seven_day_model"]),
+                sevenDayModelResetsAt: epoch(row["seven_day_model_resets_at"]),
+                sevenDayModelLabel: nonEmpty(row["seven_day_model_label"]),
                 checkedAt: date(row["checked_at"]),
                 error: nonEmpty(row["error"])
             )
