@@ -264,6 +264,11 @@ private enum Theme {
         if percent <= 60 { return NSColor(calibratedRed: 1.0, green: 0.62, blue: 0.04, alpha: 1) }
         return NSColor(calibratedRed: 0.204, green: 0.78, blue: 0.349, alpha: 1)
     }
+    /// The weekly pace: calm for a week clearly behind its pace (room left to use), the warning
+    /// colour for one clearly ahead; the same green and orange as the bars.
+    static let paceRoom = level(for: 100)
+    static let paceAhead = level(for: 50)
+    static var paceTick: NSColor { NSColor.labelColor.withAlphaComponent(isDark ? 0.8 : 0.65) }
     static let primaryText = NSColor.labelColor
     static let secondaryText = NSColor.secondaryLabelColor
     static let mutedText = NSColor.tertiaryLabelColor
@@ -334,6 +339,10 @@ private struct QuotaCard {
     var modelWeeklyLabel: String? = nil
     var modelWeeklyPercent: Int? = nil
     var modelWeeklyResetSeconds: Int? = nil
+    /// Claude: the weekly rows' pace (`WeeklyPace`, the share of the week passed, in percent); nil
+    /// when the reset time is unknown or past, and always in Codex mode.
+    var weeklyPace: Int? = nil
+    var modelWeeklyPace: Int? = nil
     /// Claude: replaces the Codex reset-credit lines on the card's top right.
     var headline: String? = nil
     var subline: String? = nil
@@ -358,6 +367,10 @@ private struct QuotaCard {
     /// (Fable), so the menu bar never shows that one as the weekly value.
     var generalWeeklyPercent: Int? {
         weeklyLabel == nil ? weeklyPercent : nil
+    }
+
+    var hasPace: Bool {
+        weeklyPace != nil || modelWeeklyPace != nil
     }
 }
 
@@ -1701,8 +1714,10 @@ final class QuotaViewController: NSViewController {
         let accounts = latestCards
             .sorted(by: sortCards)
             .map { card -> String in
-                let model = card.modelWeeklyLabel.map { ", \($0) \(percentText(card.modelWeeklyPercent))" } ?? ""
-                return "- \(compactAccountName(card.name)): \(L.text("session", "oturum")) \(percentText(card.sessionPercent)), \(L.text("weekly", "haftalık")) \(percentText(card.weeklyPercent))\(model)"
+                // Every weekly value carries its pace when the reset time gives one.
+                func pace(_ value: Int?) -> String { value.map { " " + WeeklyPace.rowText($0, turkish: L.isTurkish) } ?? "" }
+                let model = card.modelWeeklyLabel.map { ", \($0) \(percentText(card.modelWeeklyPercent))\(pace(card.modelWeeklyPace))" } ?? ""
+                return "- \(compactAccountName(card.name)): \(L.text("session", "oturum")) \(percentText(card.sessionPercent)), \(L.text("weekly", "haftalık")) \(percentText(card.weeklyPercent))\(pace(card.weeklyPace))\(model)"
             }
             .joined(separator: "\n")
         if AppConfig.mode() == .claude {
@@ -1839,6 +1854,8 @@ private final class AccountsGroupView: RoundedView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
+        // Every card gets the pace column once one has a pace, so the bars line up down the list.
+        let paceColumn = cards.contains(where: \.hasPace)
         for (index, card) in cards.enumerated() {
             if index > 0 {
                 let hairline = NSView()
@@ -1852,7 +1869,7 @@ private final class AccountsGroupView: RoundedView {
                     hairline.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -12)
                 ])
             }
-            let row = AccountCardView(card: card, isActive: card.name == activeName)
+            let row = AccountCardView(card: card, isActive: card.name == activeName, paceColumn: paceColumn)
             stack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
@@ -1872,7 +1889,7 @@ private final class AccountsGroupView: RoundedView {
 
 /// One account row: name and chip, two quota bars, one muted footer line.
 private final class AccountCardView: NSView {
-    init(card: QuotaCard, isActive: Bool = false) {
+    init(card: QuotaCard, isActive: Bool = false, paceColumn: Bool = false) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -1896,12 +1913,14 @@ private final class AccountCardView: NSView {
 
         let chip = ChipView(text: chipText(card), tint: Theme.accent)
 
-        let session = MetricView(title: L.text("5h", "5 saat"), percent: card.sessionPercent, resetSeconds: card.sessionResetSeconds)
-        let weekly = MetricView(title: card.weeklyLabel ?? L.text("Weekly", "Haftalık"), percent: card.weeklyPercent, resetSeconds: card.weeklyResetSeconds)
+        let session = MetricView(title: L.text("5h", "5 saat"), percent: card.sessionPercent, resetSeconds: card.sessionResetSeconds, paceColumn: paceColumn)
+        let weekly = MetricView(title: card.weeklyLabel ?? L.text("Weekly", "Haftalık"), percent: card.weeklyPercent, resetSeconds: card.weeklyResetSeconds,
+                                pace: card.weeklyPace, paceColumn: paceColumn)
         // The model-scoped weekly limit (Fable) sits under the general weekly one as a third row.
         let modelWeekly = card.modelWeeklyLabel.map { label -> MetricView in
             weekly.toolTip = L.text("Weekly limit · all models", "Haftalık sınır · tüm modeller")
-            let row = MetricView(title: label, percent: card.modelWeeklyPercent, resetSeconds: card.modelWeeklyResetSeconds)
+            let row = MetricView(title: label, percent: card.modelWeeklyPercent, resetSeconds: card.modelWeeklyResetSeconds,
+                                 pace: card.modelWeeklyPace, paceColumn: paceColumn)
             row.toolTip = L.text("Weekly limit · \(label)", "Haftalık sınır · \(label)")
             return row
         }
@@ -2236,7 +2255,10 @@ private final class TotalMetricView: NSView {
 
 /// Label · thin bar · percent · time-to-reset.
 private final class MetricView: NSView {
-    init(title: String, percent: Int?, resetSeconds: Int?) {
+    /// `pace` (weekly rows, Claude) puts a tick on the bar and "· pace N%" after the percentage,
+    /// coloured by how far the use is from it. `paceColumn` keeps that text's room in rows without
+    /// a pace too, so the bars of a list stay the same length.
+    init(title: String, percent: Int?, resetSeconds: Int?, pace: Int? = nil, paceColumn: Bool = false) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -2246,7 +2268,7 @@ private final class MetricView: NSView {
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        let bar = ProgressBar(percent: percent)
+        let bar = ProgressBar(percent: percent, pace: pace)
         bar.translatesAutoresizingMaskIntoConstraints = false
 
         let percentLabel = NSTextField(labelWithString: percent.map { "\($0)%" } ?? "--")
@@ -2264,6 +2286,23 @@ private final class MetricView: NSView {
 
         [titleLabel, bar, percentLabel, timeLabel].forEach(addSubview)
 
+        // Between the percentage and the reset time: "· pace 34%", or an empty slot of that width.
+        let paceLabel = NSTextField(labelWithString: pace.map { WeeklyPace.rowText($0, turkish: L.isTurkish) } ?? "")
+        paceLabel.font = Self.paceFont
+        paceLabel.lineBreakMode = .byClipping
+        paceLabel.translatesAutoresizingMaskIntoConstraints = false
+        let standing = WeeklyPace.standing(remainingPercent: percent, pacePercent: pace)
+        switch standing {
+        case .behind: paceLabel.textColor = Theme.paceRoom
+        case .ahead: paceLabel.textColor = Theme.paceAhead
+        case .even, nil: paceLabel.textColor = Theme.secondaryText
+        }
+        if let pace {
+            paceLabel.toolTip = Self.paceToolTip(pace: pace, remaining: percent, standing: standing)
+        }
+        let showsPace = paceColumn || pace != nil
+        if showsPace { addSubview(paceLabel) }
+
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: 16),
 
@@ -2275,15 +2314,47 @@ private final class MetricView: NSView {
             timeLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             timeLabel.widthAnchor.constraint(equalToConstant: 44),
 
-            percentLabel.trailingAnchor.constraint(equalTo: timeLabel.leadingAnchor, constant: -4),
+            percentLabel.trailingAnchor.constraint(equalTo: showsPace ? paceLabel.leadingAnchor : timeLabel.leadingAnchor,
+                                                   constant: showsPace ? -3 : -4),
             percentLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             percentLabel.widthAnchor.constraint(equalToConstant: 36),
 
             bar.leadingAnchor.constraint(equalTo: titleLabel.trailingAnchor, constant: 6),
             bar.trailingAnchor.constraint(equalTo: percentLabel.leadingAnchor, constant: -6),
             bar.centerYAnchor.constraint(equalTo: centerYAnchor),
-            bar.heightAnchor.constraint(equalToConstant: 4)
-        ])
+            // Taller than the 4 pt track so the pace tick can reach past it.
+            bar.heightAnchor.constraint(equalToConstant: ProgressBar.height)
+        ] + (showsPace ? [
+            paceLabel.trailingAnchor.constraint(equalTo: timeLabel.leadingAnchor, constant: -2),
+            paceLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            paceLabel.widthAnchor.constraint(equalToConstant: Self.paceColumnWidth)
+        ] : []))
+    }
+
+    private static let paceFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+
+    /// Wide enough for the longest pace text in the current language.
+    private static var paceColumnWidth: CGFloat {
+        let widest = WeeklyPace.rowText(100, turkish: L.isTurkish) as NSString
+        return ceil(widest.size(withAttributes: [.font: paceFont]).width) + 5
+    }
+
+    private static func paceToolTip(pace: Int, remaining: Int?, standing: WeeklyPace.Standing?) -> String {
+        let passed = L.text("\(pace)% of the week has passed", "Haftanın \(pace)%'i geçti")
+        guard let remaining, let standing else { return passed }
+        let used = 100 - remaining
+        let gap = abs(used - pace)
+        let verdict: String
+        switch standing {
+        case .behind:
+            verdict = L.text("\(gap) points behind pace: quota waits unused and is lost at the reset",
+                             "tempodan \(gap) puan geride: kota boşta bekliyor, resette yanar")
+        case .ahead:
+            verdict = L.text("\(gap) points ahead of pace", "tempodan \(gap) puan önde")
+        case .even:
+            verdict = L.text("on pace", "tempoda")
+        }
+        return L.text("\(passed), \(used)% used: \(verdict)", "\(passed), \(used)% kullanıldı: \(verdict)")
     }
 
     required init?(coder: NSCoder) {
@@ -2459,10 +2530,18 @@ private final class LimitTabsView: NSView {
 }
 
 private final class ProgressBar: NSView {
+    /// The height of a bar with a pace tick; the track is the 4 pt band in its middle and the
+    /// tick runs the full height. A bar without a pace may be just the track.
+    static let height: CGFloat = 10
+    private static let trackHeight: CGFloat = 4
     private let percent: Int?
+    /// The weekly pace in percent. The bar fills with what is left, so the tick sits where an
+    /// evenly spent week would leave it (100 − pace): a fill reaching past the tick is room.
+    private let pace: Int?
 
-    init(percent: Int?) {
+    init(percent: Int?, pace: Int? = nil) {
         self.percent = percent
+        self.pace = pace
         super.init(frame: .zero)
         wantsLayer = true
     }
@@ -2472,14 +2551,24 @@ private final class ProgressBar: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let radius = bounds.height / 2
+        let trackHeight = min(bounds.height, Self.trackHeight)
+        let track = NSRect(x: 0, y: round((bounds.height - trackHeight) / 2), width: bounds.width, height: trackHeight)
+        let radius = track.height / 2
         Theme.progressTrack.setFill()
-        NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius).fill()
+        NSBezierPath(roundedRect: track, xRadius: radius, yRadius: radius).fill()
 
-        guard let percent, percent > 0 else { return }
-        let width = max(bounds.height, bounds.width * min(CGFloat(percent), 100) / 100)
-        Theme.level(for: percent).setFill()
-        NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: width, height: bounds.height), xRadius: radius, yRadius: radius).fill()
+        if let percent, percent > 0 {
+            let width = max(track.height, track.width * min(CGFloat(percent), 100) / 100)
+            Theme.level(for: percent).setFill()
+            NSBezierPath(roundedRect: NSRect(x: 0, y: track.minY, width: width, height: track.height), xRadius: radius, yRadius: radius).fill()
+        }
+
+        guard let pace else { return }
+        let tickWidth: CGFloat = 1.5
+        let x = track.width * CGFloat(100 - min(100, max(0, pace))) / 100
+        let tick = NSRect(x: min(max(0, x - tickWidth / 2), bounds.width - tickWidth), y: 0, width: tickWidth, height: bounds.height)
+        Theme.paceTick.setFill()
+        NSBezierPath(roundedRect: tick, xRadius: tickWidth / 2, yRadius: tickWidth / 2).fill()
     }
 }
 
@@ -3540,6 +3629,8 @@ private final class QuotaAPI {
                         modelWeeklyLabel: quota.modelWeeklyLabel,
                         modelWeeklyPercent: quota.modelWeeklyRemaining,
                         modelWeeklyResetSeconds: quota.modelWeeklyResetSeconds,
+                        weeklyPace: quota.weeklyPace,
+                        modelWeeklyPace: quota.modelWeeklyPace,
                         headline: "\(plan) · Proxy",
                         subline: quota.weeklyResetDate.map(ClaudeAPI.formatDate) ?? "--"
                     )
@@ -3875,6 +3966,8 @@ private enum DesktopUsageCache {
             modelWeeklyLabel: entry.modelWeeklyLabel,
             modelWeeklyPercent: modelWeekly.percent,
             modelWeeklyResetSeconds: modelWeekly.seconds,
+            weeklyPace: weekly.percent == nil ? nil : WeeklyPace.percent(resetsAt: entry.weeklyResetAt, now: now),
+            modelWeeklyPace: modelWeekly.percent == nil ? nil : WeeklyPace.percent(resetsAt: entry.modelWeeklyResetAt, now: now),
             headline: entry.headline,
             subline: entry.subline,
             stale: true,
@@ -3951,6 +4044,8 @@ private enum DesktopUsage {
                 modelWeeklyLabel: quota.modelWeeklyLabel,
                 modelWeeklyPercent: quota.modelWeeklyRemaining,
                 modelWeeklyResetSeconds: quota.modelWeeklyResetSeconds,
+                weeklyPace: quota.weeklyPace,
+                modelWeeklyPace: quota.modelWeeklyPace,
                 headline: "\(plan) · Desktop",
                 subline: quota.weeklyResetDate.map(ClaudeAPI.formatDate) ?? "--"
             )
@@ -4057,9 +4152,12 @@ struct ClaudeQuota {
     var modelWeeklyRemaining: Int?
     var modelWeeklyResetSeconds: Int?
     var modelWeeklyResetDate: Date?
+    /// The weekly rows' pace in percent (`WeeklyPace`); nil without a reset time.
+    var weeklyPace: Int?
+    var modelWeeklyPace: Int?
     var limitReached = false
 
-    static func parse(_ usage: [String: Any]) -> ClaudeQuota {
+    static func parse(_ usage: [String: Any], now: Date = Date()) -> ClaudeQuota {
         typealias Window = (remaining: Int?, resets: Date?)
         var session: Window?
         var general: Window?
@@ -4092,7 +4190,7 @@ struct ClaudeQuota {
 
         var quota = ClaudeQuota()
         quota.sessionRemaining = session?.remaining
-        quota.sessionResetSeconds = session?.resets.map { max(0, Int($0.timeIntervalSinceNow)) }
+        quota.sessionResetSeconds = session?.resets.map { max(0, Int($0.timeIntervalSince(now))) }
         let model = scoped.first(where: { $0.label.lowercased().contains("fable") }) ?? scoped.first
         let weekly: Window?
         if let general {
@@ -4102,7 +4200,8 @@ struct ClaudeQuota {
                 quota.modelWeeklyLabel = model.label
                 quota.modelWeeklyRemaining = model.window.remaining
                 quota.modelWeeklyResetDate = model.window.resets
-                quota.modelWeeklyResetSeconds = model.window.resets.map { max(0, Int($0.timeIntervalSinceNow)) }
+                quota.modelWeeklyResetSeconds = model.window.resets.map { max(0, Int($0.timeIntervalSince(now))) }
+                quota.modelWeeklyPace = model.window.remaining == nil ? nil : WeeklyPace.percent(resetsAt: model.window.resets, now: now)
             }
         } else if let model {
             weekly = model.window
@@ -4112,7 +4211,8 @@ struct ClaudeQuota {
         }
         quota.weeklyRemaining = weekly?.remaining
         quota.weeklyResetDate = weekly?.resets
-        quota.weeklyResetSeconds = weekly?.resets.map { max(0, Int($0.timeIntervalSinceNow)) }
+        quota.weeklyResetSeconds = weekly?.resets.map { max(0, Int($0.timeIntervalSince(now))) }
+        quota.weeklyPace = weekly?.remaining == nil ? nil : WeeklyPace.percent(resetsAt: weekly?.resets, now: now)
         let locked = ((usage["five_hour"] as? [String: Any])?["locked_reason"] as? String).map { !$0.isEmpty } ?? false
         // A model-scoped weekly (Fable) running out does not stop the account.
         quota.limitReached = locked || quota.sessionRemaining == 0 || (quota.weeklyLabel == nil && quota.weeklyRemaining == 0)
@@ -5231,7 +5331,44 @@ extension QuotaViewController {
             return [header, makeInfoBox(L.text("GrandeClaudex reports no Claude workers.", "GrandeClaudex hiç Claude worker'ı bildirmiyor."))]
         }
         let now = Date()
-        return [header, AccountsGroupView(cards: snapshot.workers.map { claudexCard($0, now: now) })]
+        let rooms = snapshot.roomLines(now: now, turkish: L.isTurkish).map(makeRoomLine)
+        return [header, AccountsGroupView(cards: snapshot.workers.map { claudexCard($0, now: now) })] + rooms
+    }
+
+    /// "Fable room: …" under the Claudex list: the label part in the pace's room colour.
+    private func makeRoomLine(_ text: String) -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        let label = NSTextField(wrappingLabelWithString: "")
+        // Non-breaking hyphens, so a wrap never splits a worker name like "gc-worker4".
+        let text = text.replacingOccurrences(of: "-", with: "\u{2011}")
+        let attributed = NSMutableAttributedString(string: text, attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular),
+            .foregroundColor: Theme.secondaryText
+        ])
+        if let colon = text.range(of: ":") {
+            attributed.addAttributes([
+                .font: NSFont.systemFont(ofSize: 10.5, weight: .semibold),
+                .foregroundColor: Theme.paceRoom
+            ], range: NSRange(text.startIndex..<colon.upperBound, in: text))
+        }
+        // Not selectable: a selected label redraws without its attributes.
+        label.isSelectable = false
+        label.attributedStringValue = attributed
+        label.toolTip = L.text(
+            "Accounts whose week is at least \(WeeklyPace.margin) points behind its pace: quota that would go unused at the reset.",
+            "Haftası tempodan en az \(WeeklyPace.margin) puan geride olan hesaplar: resette boşa gidecek kota."
+        )
+        label.preferredMaxLayoutWidth = UI.cardWidth - 8
+        label.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -4),
+            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 1),
+            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -1)
+        ])
+        return container
     }
 
     /// Updates the status line in place, so starting a probe does not rebuild the cards.
@@ -5285,6 +5422,8 @@ extension QuotaViewController {
             weeklyLabel: worker.weeklyModel,
             modelWeeklyLabel: modelWeekly == nil ? nil : worker.sevenDayModelLabel,
             modelWeeklyPercent: modelWeekly?.remainingPercent, modelWeeklyResetSeconds: modelWeekly?.resetSeconds,
+            weeklyPace: weekly?.pacePercent,
+            modelWeeklyPace: modelWeekly?.pacePercent,
             headline: "\(plan) · \(worker.alias)",
             note: note
         )
