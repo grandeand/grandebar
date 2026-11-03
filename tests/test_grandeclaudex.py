@@ -10,7 +10,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = [ROOT / "Sources" / "GrandeClaudex.swift", ROOT / "Sources" / "ClaudeLimitsTab.swift"]
+SOURCES = [ROOT / "Sources" / "GrandeClaudex.swift", ROOT / "Sources" / "ClaudeLimitsTab.swift", ROOT / "Sources" / "WeeklyPace.swift"]
 
 HARNESS = """
 import Foundation
@@ -38,6 +38,8 @@ func describeWorker(_ worker: GrandeClaudexWorker, now: Date) -> [String: Any] {
         "sevenDay": window(worker.sevenDayWindow(now: now)),
         "sevenDayModel": window(worker.sevenDayModelWindow(now: now)),
         "sevenDayModelLabel": worker.sevenDayModelLabel ?? NSNull(),
+        "sevenDayPace": worker.sevenDayWindow(now: now)?.pacePercent ?? NSNull(),
+        "sevenDayModelPace": worker.sevenDayModelWindow(now: now)?.pacePercent ?? NSNull(),
         "checkedAt": worker.checkedAt?.timeIntervalSince1970 ?? NSNull(),
         "error": worker.error ?? NSNull()
     ]
@@ -48,7 +50,9 @@ func describe(_ snapshot: GrandeClaudexSnapshot, now: Date) -> [String: Any] {
         "chief": snapshot.chief ?? NSNull(),
         "chiefUsage": snapshot.chiefUsage.map { describeWorker($0, now: now) } ?? NSNull(),
         "generatedAt": snapshot.generatedAt?.timeIntervalSince1970 ?? NSNull(),
-        "workers": snapshot.workers.map { describeWorker($0, now: now) }
+        "workers": snapshot.workers.map { describeWorker($0, now: now) },
+        "rooms": snapshot.roomLines(now: now, turkish: false),
+        "roomsTurkish": snapshot.roomLines(now: now, turkish: true)
     ]
 }
 
@@ -85,6 +89,7 @@ default:
 """
 
 NOW = 1_792_100_000
+DAY = 86_400
 
 
 def worker(**overrides):
@@ -228,6 +233,111 @@ class GrandeClaudexTests(unittest.TestCase):
         # Older gdc output has no chief record, and a Codex chief record is ignored.
         self.assertIsNone(self.parse(payload(worker(id="a")))["chiefUsage"])
         self.assertIsNone(self.parse(payload(worker(id="a"), chief_usage=worker(id="chief", kind="codex")))["chiefUsage"])
+
+    def test_weekly_pace_from_the_reset_times(self):
+        # Day 3 of 7 on both weeklies; the 5h window has no pace.
+        row = self.parse(payload(worker(
+            seven_day=0.07, seven_day_resets_at=NOW + 4 * DAY, seven_day_label="all models",
+            seven_day_model=0.5, seven_day_model_resets_at=NOW + DAY, seven_day_model_label="Fable",
+        )))["workers"][0]
+        self.assertEqual(row["sevenDayPace"], 43)
+        self.assertEqual(row["sevenDayModelPace"], 86)
+
+    def test_weekly_pace_edge_cases(self):
+        rows = self.parse(payload(
+            worker(id="week-ahead", seven_day=0.1, seven_day_resets_at=NOW + 7 * DAY),
+            worker(id="elapsed", seven_day=0.9, seven_day_resets_at=NOW - 60,
+                   seven_day_model=0.9, seven_day_model_resets_at=NOW - 60, seven_day_model_label="Fable"),
+            worker(id="no-reset", seven_day=0.3, seven_day_resets_at=None),
+            worker(id="no-value", seven_day=None, seven_day_resets_at=NOW + DAY),
+        ))["workers"]
+        self.assertEqual([r["sevenDayPace"] for r in rows], [0, None, None, None])
+        # A passed reset shows a fresh week whose next reset is unknown, so it has no pace.
+        self.assertIsNone(rows[1]["sevenDayModelPace"])
+
+    def test_old_gdc_without_model_or_pace_fields(self):
+        # gdc before the model-scoped weekly: no seven_day_model* and no *_pace keys at all.
+        row = worker(seven_day=0.2, seven_day_resets_at=NOW + 4 * DAY, seven_day_label="all models")
+        for key in ("seven_day_model", "seven_day_model_resets_at", "seven_day_model_label"):
+            del row[key]
+        parsed = self.parse(payload(row))["workers"][0]
+        self.assertEqual(parsed["sevenDay"], {"remaining": 80, "reset": 4 * DAY, "hasReset": False})
+        self.assertEqual(parsed["sevenDayPace"], 43)
+        self.assertIsNone(parsed["sevenDayModel"])
+        self.assertIsNone(parsed["sevenDayModelLabel"])
+        self.assertIsNone(parsed["sevenDayModelPace"])
+
+    def test_new_gdc_pace_fields_are_read(self):
+        row = self.parse(payload(worker(
+            seven_day=0.07, seven_day_resets_at=NOW + 4 * DAY, seven_day_label="all models", seven_day_pace=0.34,
+            seven_day_model=0.05, seven_day_model_resets_at=NOW + 4 * DAY, seven_day_model_label="Fable",
+            seven_day_model_pace=0.35,
+        )))["workers"][0]
+        self.assertEqual(row["sevenDayPace"], 34)
+        self.assertEqual(row["sevenDayModelPace"], 35)
+        self.assertEqual(row["sevenDayModel"], {"remaining": 95, "reset": 4 * DAY, "hasReset": False})
+        self.assertEqual(row["sevenDayModelLabel"], "Fable")
+
+    def test_unusable_gdc_pace_falls_back_to_the_reset_time(self):
+        rows = self.parse(payload(
+            worker(id="percent", seven_day=0.1, seven_day_resets_at=NOW + 4 * DAY, seven_day_pace=34),
+            worker(id="null", seven_day=0.1, seven_day_resets_at=NOW + 4 * DAY, seven_day_pace=None),
+            worker(id="text", seven_day=0.1, seven_day_resets_at=NOW + 4 * DAY, seven_day_pace="0.34"),
+            worker(id="bool", seven_day=0.1, seven_day_resets_at=NOW + 4 * DAY, seven_day_pace=True),
+        ))["workers"]
+        self.assertEqual([r["sevenDayPace"] for r in rows], [43, 43, 43, 43])
+
+    def test_fable_room_line(self):
+        def fable(id, used, resets_in=4 * DAY, **extra):
+            return worker(id=id, alias=id, seven_day=0.3, seven_day_resets_at=NOW + resets_in, seven_day_label="all models",
+                          seven_day_model=used, seven_day_model_resets_at=NOW + resets_in, seven_day_model_label="Fable", **extra)
+        parsed = self.parse(payload(
+            fable("gc-1", 0.07),                      # 7% vs pace 43%: behind
+            fable("gc-2", 0.40),                      # on pace
+            fable("gc-3", 0.90),                      # ahead
+            fable("gc-4", 0.10, logged_in=False),     # not signed in: its limits do not show
+            fable("gc-5", 0.10, resets_in=-60),       # reset passed: no pace
+            worker(id="gc-6", alias="gc-6", seven_day=0.2, seven_day_resets_at=NOW + 4 * DAY, seven_day_label="Fable"),
+        ))
+        self.assertEqual(parsed["rooms"], ["Fable room: gc-1 (7% vs pace 43%), gc-6 (20% vs pace 43%)"])
+        self.assertEqual(parsed["roomsTurkish"], ["Fable için yer var: gc-1 (7% / tempo 43%), gc-6 (20% / tempo 43%)"])
+
+    def test_no_room_line_when_every_fable_week_is_on_pace(self):
+        parsed = self.parse(payload(
+            worker(id="a", seven_day=0.05, seven_day_resets_at=NOW + 4 * DAY, seven_day_label="all models",
+                   seven_day_model=0.4, seven_day_model_resets_at=NOW + 4 * DAY, seven_day_model_label="Fable"),
+            # Far behind on the general weekly only: that is not Fable room.
+            worker(id="b", seven_day=0.0, seven_day_resets_at=NOW + 4 * DAY, seven_day_label="all models"),
+        ))
+        self.assertEqual(parsed["rooms"], [])
+
+    def test_chief_weekly_rows_have_a_pace(self):
+        # gdc's own pace for the chief is used as it is.
+        reported = worker(id="chief", alias="chief", seven_day=0.07, seven_day_resets_at=NOW + 4 * DAY,
+                          seven_day_label="all models", seven_day_pace=0.34,
+                          seven_day_model=0.05, seven_day_model_resets_at=NOW + DAY, seven_day_model_label="Fable",
+                          seven_day_model_pace=0.35)
+        chief = self.parse(payload(worker(id="a"), chief_usage=reported))["chiefUsage"]
+        self.assertEqual((chief["sevenDayPace"], chief["sevenDayModelPace"]), (34, 35))
+        # Without gdc's pace fields it comes from the reset times, like a worker's.
+        computed = worker(id="chief", alias="chief", seven_day=0.07, seven_day_resets_at=NOW + 4 * DAY,
+                          seven_day_label="all models",
+                          seven_day_model=0.05, seven_day_model_resets_at=NOW + DAY, seven_day_model_label="Fable")
+        chief = self.parse(payload(worker(id="a"), chief_usage=computed))["chiefUsage"]
+        self.assertEqual((chief["sevenDayPace"], chief["sevenDayModelPace"]), (43, 86))
+
+    def test_fable_room_line_names_the_chief_first(self):
+        def fable(id, used, **extra):
+            return worker(id=id, alias=id, seven_day=0.3, seven_day_resets_at=NOW + 4 * DAY, seven_day_label="all models",
+                          seven_day_model=used, seven_day_model_resets_at=NOW + 4 * DAY, seven_day_model_label="Fable", **extra)
+        parsed = self.parse(payload(fable("gc-1", 0.07), chief_usage=fable("chief", 0.10)))
+        self.assertEqual(parsed["rooms"], ["Fable room: Chief (10% vs pace 43%), gc-1 (7% vs pace 43%)"])
+        self.assertEqual(parsed["roomsTurkish"], ["Fable için yer var: Şef (10% / tempo 43%), gc-1 (7% / tempo 43%)"])
+        # A chief on pace, or one signed out, is left out.
+        self.assertEqual(self.parse(payload(fable("gc-1", 0.07), chief_usage=fable("chief", 0.40)))["rooms"],
+                         ["Fable room: gc-1 (7% vs pace 43%)"])
+        self.assertEqual(self.parse(payload(fable("gc-1", 0.07), chief_usage=fable("chief", 0.10, logged_in=False)))["rooms"],
+                         ["Fable room: gc-1 (7% vs pace 43%)"])
 
     def test_signed_in_account_wins_over_the_configured_one(self):
         rows = self.parse(payload(

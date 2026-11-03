@@ -14,7 +14,8 @@ import Foundation
 
 let data = FileManager.default.contents(atPath: CommandLine.arguments[1])!
 let usage = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
-let quota = ClaudeQuota.parse(usage)
+let now = CommandLine.arguments.count > 2 ? Date(timeIntervalSince1970: Double(CommandLine.arguments[2])!) : Date()
+let quota = ClaudeQuota.parse(usage, now: now)
 let result: [String: Any] = [
     "session": quota.sessionRemaining ?? NSNull(),
     "weekly": quota.weeklyRemaining ?? NSNull(),
@@ -23,6 +24,8 @@ let result: [String: Any] = [
     "modelWeekly": quota.modelWeeklyRemaining ?? NSNull(),
     "modelWeeklyLabel": quota.modelWeeklyLabel ?? NSNull(),
     "modelWeeklyResetsAt": quota.modelWeeklyResetDate?.timeIntervalSince1970 ?? NSNull(),
+    "weeklyPace": quota.weeklyPace ?? NSNull(),
+    "modelWeeklyPace": quota.modelWeeklyPace ?? NSNull(),
     "limitReached": quota.limitReached
 ]
 print(String(data: try! JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]), encoding: .utf8)!)
@@ -31,6 +34,7 @@ print(String(data: try! JSONSerialization.data(withJSONObject: result, options: 
 WEEKLY_RESET = "2026-11-08T12:00:00Z"
 WEEKLY_RESET_EPOCH = 1_794_139_200
 SESSION_RESET = "2026-11-03T23:20:00Z"
+DAY = 86_400
 
 
 def limit(kind=None, group=None, percent=0, resets_at=WEEKLY_RESET, model=None):
@@ -66,10 +70,11 @@ class ClaudeQuotaTests(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.work, ignore_errors=True)
 
-    def parse(self, usage):
+    def parse(self, usage, now=None):
         path = self.work / "usage.json"
         path.write_text(json.dumps(usage))
-        result = subprocess.run([str(self.binary), str(path)], check=True, capture_output=True, text=True)
+        result = subprocess.run([str(self.binary), str(path), *([str(now)] if now is not None else [])],
+                                check=True, capture_output=True, text=True)
         return json.loads(result.stdout)
 
     def test_three_limits_fill_the_weekly_and_the_model_rows(self):
@@ -122,6 +127,39 @@ class ClaudeQuotaTests(unittest.TestCase):
         self.assertEqual(parsed["weekly"], 86)
         self.assertEqual(parsed["modelWeekly"], 89)
         self.assertEqual(parsed["modelWeeklyLabel"], "Fable")
+
+    def test_weekly_pace_from_the_reset_time(self):
+        # Day 3 of 7 for the weekly reset; the Fable week resets a day later, so it is at day 2.
+        fable_reset = "2026-11-09T12:00:00Z"
+        now = WEEKLY_RESET_EPOCH - 4 * DAY
+        parsed = self.parse({"limits": [
+            session(40),
+            limit(group="weekly", percent=14),
+            limit(group="weekly", percent=11, model="Fable", resets_at=fable_reset),
+        ]}, now=now)
+        self.assertEqual(parsed["weeklyPace"], 43)
+        self.assertEqual(parsed["modelWeeklyPace"], 29)
+
+    def test_weekly_pace_edge_cases(self):
+        week = {"limits": [session(), limit(group="weekly", percent=14)]}
+        self.assertEqual(self.parse(week, now=WEEKLY_RESET_EPOCH - 7 * DAY)["weeklyPace"], 0)
+        # A reset in the past or none at all gives no pace.
+        self.assertIsNone(self.parse(week, now=WEEKLY_RESET_EPOCH + 60)["weeklyPace"])
+        no_reset = {"limits": [session(), limit(group="weekly", percent=14, resets_at=None)]}
+        self.assertIsNone(self.parse(no_reset, now=WEEKLY_RESET_EPOCH - DAY)["weeklyPace"])
+        # Neither without a value; a Fable-only weekly row gets the pace as the weekly row.
+        unknown = {"limits": [session(), {"group": "weekly", "resets_at": WEEKLY_RESET}]}
+        self.assertIsNone(self.parse(unknown, now=WEEKLY_RESET_EPOCH - DAY)["weeklyPace"])
+        fable_only = self.parse({"limits": [session(), limit(group="weekly", percent=11, model="Fable")]}, now=WEEKLY_RESET_EPOCH - DAY)
+        self.assertEqual((fable_only["weeklyLabel"], fable_only["weeklyPace"], fable_only["modelWeeklyPace"]), ("Fable", 86, None))
+
+    def test_legacy_windows_have_a_pace_too(self):
+        parsed = self.parse({
+            "five_hour": {"utilization": 40, "resets_at": SESSION_RESET},
+            "seven_day": {"utilization": 14, "resets_at": WEEKLY_RESET},
+            "seven_day_fable": {"utilization": 11, "resets_at": WEEKLY_RESET},
+        }, now=WEEKLY_RESET_EPOCH - 4 * DAY)
+        self.assertEqual((parsed["weeklyPace"], parsed["modelWeeklyPace"]), (43, 43))
 
     def test_only_the_general_weekly_running_out_locks_the_account(self):
         general = self.parse({"limits": [session(), limit(group="weekly", percent=100), limit(group="weekly", percent=11, model="Fable")]})

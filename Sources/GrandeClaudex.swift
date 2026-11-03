@@ -17,10 +17,14 @@ struct GrandeClaudexWorker: Equatable {
     let sevenDayResetsAt: Date?
     /// "all models" for the general weekly limit, the model (e.g. "Fable") for a model-scoped one.
     let sevenDayLabel: String?
+    /// The weekly pace gdc reports (`seven_day_pace`, 0...1); nil when this gdc does not.
+    let sevenDayPace: Double?
     /// The model-scoped weekly limit gdc reports next to the general one (`seven_day_model*`).
+    /// Older gdc versions leave these fields out; they then read as nil.
     let sevenDayModel: Double?
     let sevenDayModelResetsAt: Date?
     let sevenDayModelLabel: String?
+    let sevenDayModelPace: Double?
     let checkedAt: Date?
     let error: String?
 }
@@ -31,8 +35,11 @@ struct GrandeClaudexWindow: Equatable {
     let resetSeconds: Int?
     /// The reset time has passed, so the window is full again and the cached use no longer counts.
     let hasReset: Bool
+    /// The weekly pace in percent (`WeeklyPace`); nil for the 5h window, without a reset time and
+    /// once the reset has passed.
+    let pacePercent: Int?
 
-    init?(used: Double?, resetsAt: Date?, now: Date = Date()) {
+    init?(used: Double?, resetsAt: Date?, now: Date = Date(), weekly: Bool = false, reportedPace: Double? = nil) {
         guard let used else { return nil }
         if let resetsAt, resetsAt <= now {
             remainingPercent = 100
@@ -43,6 +50,7 @@ struct GrandeClaudexWindow: Equatable {
             resetSeconds = resetsAt.map { Int($0.timeIntervalSince(now)) }
             hasReset = false
         }
+        pacePercent = weekly ? WeeklyPace.percent(resetsAt: resetsAt, now: now, reported: reportedPace) : nil
     }
 }
 
@@ -52,11 +60,11 @@ extension GrandeClaudexWorker {
     }
 
     func sevenDayWindow(now: Date = Date()) -> GrandeClaudexWindow? {
-        GrandeClaudexWindow(used: sevenDay, resetsAt: sevenDayResetsAt, now: now)
+        GrandeClaudexWindow(used: sevenDay, resetsAt: sevenDayResetsAt, now: now, weekly: true, reportedPace: sevenDayPace)
     }
 
     func sevenDayModelWindow(now: Date = Date()) -> GrandeClaudexWindow? {
-        GrandeClaudexWindow(used: sevenDayModel, resetsAt: sevenDayModelResetsAt, now: now)
+        GrandeClaudexWindow(used: sevenDayModel, resetsAt: sevenDayModelResetsAt, now: now, weekly: true, reportedPace: sevenDayModelPace)
     }
 
     /// The plan as the Desktop chip writes it: "team" → "Team".
@@ -79,6 +87,40 @@ struct GrandeClaudexSnapshot: Equatable {
     let chiefUsage: GrandeClaudexWorker?
     let generatedAt: Date?
     let workers: [GrandeClaudexWorker]
+}
+
+extension GrandeClaudexSnapshot {
+    /// What the Claudex tab calls the chief's card, in place of a worker alias.
+    static func chiefName(turkish: Bool) -> String {
+        turkish ? "Şef" : "Chief"
+    }
+
+    /// The lines under the Claudex list, one per model-scoped weekly limit ("Fable room: …"),
+    /// naming the signed-in accounts whose model week is clearly behind its pace; empty when none is.
+    /// The chief comes first (as `chiefName`), then the workers in gdc's order, like the cards.
+    /// An account's model week is its `seven_day_model` row, or its weekly row when that is the only
+    /// weekly limit and model-scoped.
+    func roomLines(now: Date = Date(), turkish: Bool) -> [String] {
+        var labels: [String] = []
+        var entries: [String: [WeeklyPace.RoomEntry]] = [:]
+        let chief = chiefUsage.map { [(name: Self.chiefName(turkish: turkish), worker: $0)] } ?? []
+        for (name, worker) in chief + workers.map({ (name: $0.alias, worker: $0) }) where worker.loggedIn {
+            let week: (label: String, window: GrandeClaudexWindow)?
+            if let label = worker.sevenDayModelLabel, let window = worker.sevenDayModelWindow(now: now) {
+                week = (label, window)
+            } else if let label = worker.weeklyModel, let window = worker.sevenDayWindow(now: now) {
+                week = (label, window)
+            } else {
+                week = nil
+            }
+            guard let week else { continue }
+            if entries[week.label] == nil { labels.append(week.label) }
+            entries[week.label, default: []].append(WeeklyPace.RoomEntry(
+                name: name, remainingPercent: week.window.remainingPercent, pacePercent: week.window.pacePercent
+            ))
+        }
+        return labels.compactMap { WeeklyPace.roomLine(label: $0, entries: entries[$0] ?? [], turkish: turkish) }
+    }
 }
 
 /// Reads GrandeClaudex through its `gdc` CLI, which is the only thing that touches the worker
@@ -143,9 +185,11 @@ enum GrandeClaudexCLI {
             sevenDay: fraction(row["seven_day"]),
             sevenDayResetsAt: epoch(row["seven_day_resets_at"]),
             sevenDayLabel: nonEmpty(row["seven_day_label"]),
+            sevenDayPace: number(row["seven_day_pace"]),
             sevenDayModel: fraction(row["seven_day_model"]),
             sevenDayModelResetsAt: epoch(row["seven_day_model_resets_at"]),
             sevenDayModelLabel: nonEmpty(row["seven_day_model_label"]),
+            sevenDayModelPace: number(row["seven_day_model_pace"]),
             checkedAt: date(row["checked_at"]),
             error: nonEmpty(row["error"])
         )
