@@ -269,6 +269,8 @@ private enum Theme {
     static let paceRoom = level(for: 100)
     static let paceAhead = level(for: 50)
     static var paceTick: NSColor { NSColor.labelColor.withAlphaComponent(isDark ? 0.8 : 0.65) }
+    /// The stripes over the part of a weekly bar that is left beyond the pace tick.
+    static var paceHatch: NSColor { cardBackground.withAlphaComponent(0.75) }
     static let primaryText = NSColor.labelColor
     static let secondaryText = NSColor.secondaryLabelColor
     static let mutedText = NSColor.tertiaryLabelColor
@@ -350,6 +352,9 @@ private struct QuotaCard {
     var stale = false
     /// Replaces the row footer, e.g. when quota could not be read at all.
     var note: String? = nil
+    /// The account's name in the weekly pace summary (the Claudex alias); nil uses the part of the
+    /// address before the @.
+    var shortName: String? = nil
 
     var isLocked: Bool {
         if allowed == false { return true }
@@ -371,6 +376,16 @@ private struct QuotaCard {
 
     var hasPace: Bool {
         weeklyPace != nil || modelWeeklyPace != nil
+    }
+
+    /// The weekly rows (general, then the model one) for the pace summary over a list.
+    var paceAccount: WeeklyPace.Account {
+        let local = self.name.split(separator: "@").first.map(String.init) ?? self.name
+        var rows = [WeeklyPace.Row(label: weeklyLabel ?? L.text("Weekly", "Haftalık"), remainingPercent: weeklyPercent, pacePercent: weeklyPace)]
+        if let modelWeeklyLabel {
+            rows.append(WeeklyPace.Row(label: modelWeeklyLabel, remainingPercent: modelWeeklyPercent, pacePercent: modelWeeklyPace))
+        }
+        return WeeklyPace.Account(name: shortName ?? local.replacingOccurrences(of: "-team", with: ""), rows: rows)
     }
 }
 
@@ -1854,8 +1869,6 @@ private final class AccountsGroupView: RoundedView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
-        // Every card gets the pace column once one has a pace, so the bars line up down the list.
-        let paceColumn = cards.contains(where: \.hasPace)
         for (index, card) in cards.enumerated() {
             if index > 0 {
                 let hairline = NSView()
@@ -1869,7 +1882,7 @@ private final class AccountsGroupView: RoundedView {
                     hairline.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -12)
                 ])
             }
-            let row = AccountCardView(card: card, isActive: card.name == activeName, paceColumn: paceColumn)
+            let row = AccountCardView(card: card, isActive: card.name == activeName)
             stack.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
@@ -1887,9 +1900,138 @@ private final class AccountsGroupView: RoundedView {
     }
 }
 
+/// Over a list of Claude accounts: who has weekly quota the reset would waste and who runs
+/// ahead of the week, as chips, widest gap first. The account rows carry only the tick on their
+/// bars; the numbers are in the chips' and the rows' tooltips.
+private final class PaceSummaryView: RoundedView {
+    private static let captionFont = NSFont.systemFont(ofSize: 10.5, weight: .medium)
+
+    /// nil for a list with fewer than two accounts that have a pace, or when every week is on pace.
+    static func make(cards: [QuotaCard]) -> PaceSummaryView? {
+        let accounts = cards.filter(\.hasPace).map(\.paceAccount)
+        guard accounts.count >= 2 else { return nil }
+        let summary = WeeklyPace.summary(accounts)
+        guard !summary.behind.isEmpty || !summary.ahead.isEmpty else { return nil }
+        return PaceSummaryView(behind: summary.behind, ahead: summary.ahead)
+    }
+
+    private init(behind: [WeeklyPace.Entry], ahead: [WeeklyPace.Entry]) {
+        super.init(color: Theme.cardBackground, radius: 10)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        let title = NSTextField(labelWithString: L.text("Weekly pace", "Haftalık tempo"))
+        title.font = .systemFont(ofSize: 12, weight: .semibold)
+        title.textColor = Theme.primaryText
+        title.translatesAutoresizingMaskIntoConstraints = false
+
+        let legend = NSTextField(labelWithString: L.text("tick = an evenly spent week", "çentik = eşit harcanan hafta"))
+        legend.font = .systemFont(ofSize: 10, weight: .regular)
+        legend.textColor = Theme.mutedText
+        legend.lineBreakMode = .byTruncatingTail
+        legend.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        legend.toolTip = L.text(
+            "The tick on a weekly bar is where an evenly spent week would leave it today. Hatched past the tick: quota the reset would waste. Orange up to the tick: used ahead of the week.",
+            "Haftalık bardaki çentik, hafta eşit harcansa bugün olacağın yer. Çentiği geçen taralı kısım resette boşa gidecek kota, çentiğe kadar turuncu kısım haftanın önünde harcanan."
+        )
+        legend.translatesAutoresizingMaskIntoConstraints = false
+
+        let captions = [(L.text("Going unused", "Boşta kalacak"), Theme.paceRoom, behind,
+                         L.text("Weekly limits \(WeeklyPace.margin) or more points behind their pace: that quota is lost at the reset, so use these first.",
+                                "Haftalık sınırı tempodan en az \(WeeklyPace.margin) puan geride olan hesaplar: bu kota resette yanar, önce bunları kullan.")),
+                        (L.text("Running fast", "Hızlı gidiyor"), Theme.paceAhead, ahead,
+                         L.text("Weekly limits \(WeeklyPace.margin) or more points ahead of their pace: at this rate they run out before the reset.",
+                                "Haftalık sınırı tempodan en az \(WeeklyPace.margin) puan önde olan hesaplar: bu hızla reset gelmeden biter."))]
+        let captionWidth = captions.map { ceil(($0.0 as NSString).size(withAttributes: [.font: Self.captionFont]).width) }.max()! + 4
+        let groups = captions.filter { !$0.2.isEmpty }.map { caption, tint, entries, help in
+            Self.group(caption: caption, captionWidth: captionWidth, tint: tint, entries: entries, help: help)
+        }
+        let column = NSStackView(views: groups)
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = 6
+        column.translatesAutoresizingMaskIntoConstraints = false
+
+        [title, legend, column].forEach(addSubview)
+        NSLayoutConstraint.activate([
+            title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            title.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            legend.leadingAnchor.constraint(greaterThanOrEqualTo: title.trailingAnchor, constant: 8),
+            legend.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            legend.firstBaselineAnchor.constraint(equalTo: title.firstBaselineAnchor),
+            column.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            column.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
+            column.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8),
+            column.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10)
+        ])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    /// A dot and caption, then the accounts' chips, wrapping onto more lines when they do not fit.
+    private static func group(caption: String, captionWidth: CGFloat, tint: NSColor, entries: [WeeklyPace.Entry], help: String) -> NSView {
+        let dot = NSTextField(labelWithString: "●")
+        dot.font = .systemFont(ofSize: 8, weight: .regular)
+        dot.textColor = tint
+        dot.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = NSTextField(labelWithString: caption)
+        label.font = captionFont
+        label.textColor = Theme.secondaryText
+        label.toolTip = help
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        let chips = entries.map { entry -> NSView in
+            let chip = ChipView(text: entry.name, tint: tint)
+            chip.toolTip = WeeklyPace.entryToolTip(entry, turkish: L.isTurkish)
+            return chip
+        }
+        let available = UI.cardWidth - 24 - ceil(dot.fittingSize.width) - 5 - captionWidth - 5
+        var lines: [[NSView]] = [[]]
+        var used: CGFloat = 0
+        for chip in chips {
+            let width = chip.fittingSize.width
+            if !lines[lines.count - 1].isEmpty && used + 5 + width > available {
+                lines.append([])
+                used = 0
+            }
+            used += (lines[lines.count - 1].isEmpty ? 0 : 5) + width
+            lines[lines.count - 1].append(chip)
+        }
+        let rows = lines.map { line -> NSStackView in
+            let row = NSStackView(views: line)
+            row.orientation = .horizontal
+            row.spacing = 5
+            return row
+        }
+        let flow = NSStackView(views: rows)
+        flow.orientation = .vertical
+        flow.alignment = .leading
+        flow.spacing = 4
+        flow.translatesAutoresizingMaskIntoConstraints = false
+
+        let group = NSView()
+        group.translatesAutoresizingMaskIntoConstraints = false
+        [dot, label, flow].forEach(group.addSubview)
+        NSLayoutConstraint.activate([
+            dot.leadingAnchor.constraint(equalTo: group.leadingAnchor),
+            dot.centerYAnchor.constraint(equalTo: label.centerYAnchor),
+            label.leadingAnchor.constraint(equalTo: dot.trailingAnchor, constant: 5),
+            label.widthAnchor.constraint(equalToConstant: captionWidth),
+            label.centerYAnchor.constraint(equalTo: rows[0].centerYAnchor),
+            flow.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 5),
+            flow.trailingAnchor.constraint(lessThanOrEqualTo: group.trailingAnchor),
+            flow.topAnchor.constraint(equalTo: group.topAnchor),
+            flow.bottomAnchor.constraint(equalTo: group.bottomAnchor)
+        ])
+        return group
+    }
+}
+
 /// One account row: name and chip, two quota bars, one muted footer line.
 private final class AccountCardView: NSView {
-    init(card: QuotaCard, isActive: Bool = false, paceColumn: Bool = false) {
+    init(card: QuotaCard, isActive: Bool = false) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -1913,15 +2055,16 @@ private final class AccountCardView: NSView {
 
         let chip = ChipView(text: chipText(card), tint: Theme.accent)
 
-        let session = MetricView(title: L.text("5h", "5 saat"), percent: card.sessionPercent, resetSeconds: card.sessionResetSeconds, paceColumn: paceColumn)
+        let session = MetricView(title: L.text("5h", "5 saat"), percent: card.sessionPercent, resetSeconds: card.sessionResetSeconds)
         let weekly = MetricView(title: card.weeklyLabel ?? L.text("Weekly", "Haftalık"), percent: card.weeklyPercent, resetSeconds: card.weeklyResetSeconds,
-                                pace: card.weeklyPace, paceColumn: paceColumn)
+                                pace: card.weeklyPace)
         // The model-scoped weekly limit (Fable) sits under the general weekly one as a third row.
+        // The rows' names go before their pace tooltips.
         let modelWeekly = card.modelWeeklyLabel.map { label -> MetricView in
-            weekly.toolTip = L.text("Weekly limit · all models", "Haftalık sınır · tüm modeller")
+            weekly.toolTip = [L.text("Weekly limit · all models", "Haftalık sınır · tüm modeller"), weekly.toolTip].compactMap { $0 }.joined(separator: "\n")
             let row = MetricView(title: label, percent: card.modelWeeklyPercent, resetSeconds: card.modelWeeklyResetSeconds,
-                                 pace: card.modelWeeklyPace, paceColumn: paceColumn)
-            row.toolTip = L.text("Weekly limit · \(label)", "Haftalık sınır · \(label)")
+                                 pace: card.modelWeeklyPace)
+            row.toolTip = [L.text("Weekly limit · \(label)", "Haftalık sınır · \(label)"), row.toolTip].compactMap { $0 }.joined(separator: "\n")
             return row
         }
         let rows = [session, weekly] + (modelWeekly.map { [$0] } ?? [])
@@ -2255,10 +2398,10 @@ private final class TotalMetricView: NSView {
 
 /// Label · thin bar · percent · time-to-reset.
 private final class MetricView: NSView {
-    /// `pace` (weekly rows, Claude) puts a tick on the bar and "· pace N%" after the percentage,
-    /// coloured by how far the use is from it. `paceColumn` keeps that text's room in rows without
-    /// a pace too, so the bars of a list stay the same length.
-    init(title: String, percent: Int?, resetSeconds: Int?, pace: Int? = nil, paceColumn: Bool = false) {
+    /// `pace` (weekly rows, Claude) puts a tick on the bar where an evenly spent week would leave
+    /// it and marks the gap to it on the bar (`ProgressBar`); the numbers are in the row's tooltip,
+    /// so the row carries no extra text and its bar keeps its length.
+    init(title: String, percent: Int?, resetSeconds: Int?, pace: Int? = nil) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -2286,22 +2429,10 @@ private final class MetricView: NSView {
 
         [titleLabel, bar, percentLabel, timeLabel].forEach(addSubview)
 
-        // Between the percentage and the reset time: "· pace 34%", or an empty slot of that width.
-        let paceLabel = NSTextField(labelWithString: pace.map { WeeklyPace.rowText($0, turkish: L.isTurkish) } ?? "")
-        paceLabel.font = Self.paceFont
-        paceLabel.lineBreakMode = .byClipping
-        paceLabel.translatesAutoresizingMaskIntoConstraints = false
-        let standing = WeeklyPace.standing(remainingPercent: percent, pacePercent: pace)
-        switch standing {
-        case .behind: paceLabel.textColor = Theme.paceRoom
-        case .ahead: paceLabel.textColor = Theme.paceAhead
-        case .even, nil: paceLabel.textColor = Theme.secondaryText
-        }
         if let pace {
-            paceLabel.toolTip = Self.paceToolTip(pace: pace, remaining: percent, standing: standing)
+            toolTip = Self.paceToolTip(pace: pace, remaining: percent,
+                                       standing: WeeklyPace.standing(remainingPercent: percent, pacePercent: pace))
         }
-        let showsPace = paceColumn || pace != nil
-        if showsPace { addSubview(paceLabel) }
 
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: 16),
@@ -2314,8 +2445,7 @@ private final class MetricView: NSView {
             timeLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             timeLabel.widthAnchor.constraint(equalToConstant: 44),
 
-            percentLabel.trailingAnchor.constraint(equalTo: showsPace ? paceLabel.leadingAnchor : timeLabel.leadingAnchor,
-                                                   constant: showsPace ? -3 : -4),
+            percentLabel.trailingAnchor.constraint(equalTo: timeLabel.leadingAnchor, constant: -4),
             percentLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
             percentLabel.widthAnchor.constraint(equalToConstant: 36),
 
@@ -2324,19 +2454,7 @@ private final class MetricView: NSView {
             bar.centerYAnchor.constraint(equalTo: centerYAnchor),
             // Taller than the 4 pt track so the pace tick can reach past it.
             bar.heightAnchor.constraint(equalToConstant: ProgressBar.height)
-        ] + (showsPace ? [
-            paceLabel.trailingAnchor.constraint(equalTo: timeLabel.leadingAnchor, constant: -2),
-            paceLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            paceLabel.widthAnchor.constraint(equalToConstant: Self.paceColumnWidth)
-        ] : []))
-    }
-
-    private static let paceFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium)
-
-    /// Wide enough for the longest pace text in the current language.
-    private static var paceColumnWidth: CGFloat {
-        let widest = WeeklyPace.rowText(100, turkish: L.isTurkish) as NSString
-        return ceil(widest.size(withAttributes: [.font: paceFont]).width) + 5
+        ])
     }
 
     private static func paceToolTip(pace: Int, remaining: Int?, standing: WeeklyPace.Standing?) -> String {
@@ -2536,7 +2654,9 @@ private final class ProgressBar: NSView {
     private static let trackHeight: CGFloat = 4
     private let percent: Int?
     /// The weekly pace in percent. The bar fills with what is left, so the tick sits where an
-    /// evenly spent week would leave it (100 − pace): a fill reaching past the tick is room.
+    /// evenly spent week would leave it (100 − pace). A fill reaching `WeeklyPace.margin` or more
+    /// past the tick is room the reset would waste and is hatched beyond it; a fill stopping that
+    /// far short of it is use ahead of the week, and the empty stretch up to the tick is tinted.
     private let pace: Int?
 
     init(percent: Int?, pace: Int? = nil) {
@@ -2557,15 +2677,39 @@ private final class ProgressBar: NSView {
         Theme.progressTrack.setFill()
         NSBezierPath(roundedRect: track, xRadius: radius, yRadius: radius).fill()
 
+        var fillWidth: CGFloat = 0
         if let percent, percent > 0 {
-            let width = max(track.height, track.width * min(CGFloat(percent), 100) / 100)
+            fillWidth = max(track.height, track.width * min(CGFloat(percent), 100) / 100)
             Theme.level(for: percent).setFill()
-            NSBezierPath(roundedRect: NSRect(x: 0, y: track.minY, width: width, height: track.height), xRadius: radius, yRadius: radius).fill()
+            NSBezierPath(roundedRect: NSRect(x: 0, y: track.minY, width: fillWidth, height: track.height), xRadius: radius, yRadius: radius).fill()
         }
 
         guard let pace else { return }
-        let tickWidth: CGFloat = 1.5
         let x = track.width * CGFloat(100 - min(100, max(0, pace))) / 100
+        switch WeeklyPace.standing(remainingPercent: percent, pacePercent: pace) {
+        case .behind?:
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(roundedRect: NSRect(x: 0, y: track.minY, width: fillWidth, height: track.height), xRadius: radius, yRadius: radius).addClip()
+            NSBezierPath(rect: NSRect(x: x, y: track.minY, width: max(0, fillWidth - x), height: track.height)).addClip()
+            Theme.paceHatch.setStroke()
+            let hatch = NSBezierPath()
+            hatch.lineWidth = 1.1
+            var stripe = x - track.height
+            while stripe < fillWidth {
+                hatch.move(to: NSPoint(x: stripe, y: track.minY))
+                hatch.line(to: NSPoint(x: stripe + track.height, y: track.maxY))
+                stripe += 3
+            }
+            hatch.stroke()
+            NSGraphicsContext.restoreGraphicsState()
+        case .ahead?:
+            Theme.paceAhead.withAlphaComponent(0.5).setFill()
+            NSBezierPath(rect: NSRect(x: fillWidth, y: track.minY, width: max(0, x - fillWidth), height: track.height)).fill()
+        case .even?, nil:
+            break
+        }
+
+        let tickWidth: CGFloat = 1.5
         let tick = NSRect(x: min(max(0, x - tickWidth / 2), bounds.width - tickWidth), y: 0, width: tickWidth, height: bounds.height)
         Theme.paceTick.setFill()
         NSBezierPath(roundedRect: tick, xRadius: tickWidth / 2, yRadius: tickWidth / 2).fill()
@@ -5214,7 +5358,7 @@ extension QuotaViewController {
                     "Claude Desktop'ın kendi hesabı okununca burada görünür; kayıtlı Desktop hesapları son bilinen değerleriyle kalır."
                 ))]
             }
-            return [AccountsGroupView(cards: cards, activeName: activeClaudeCard(in: latestCards)?.card.name)]
+            return paceSummary(cards) + [AccountsGroupView(cards: cards, activeName: activeClaudeCard(in: latestCards)?.card.name)]
         case .claudex:
             return claudexContent()
         case .cliproxy:
@@ -5226,7 +5370,8 @@ extension QuotaViewController {
                 ))]
             }
             let total = TotalLimitCardView(summary: totalLimitSummary(for: latestCards), weeklyTitle: weeklyPoolTitle(for: latestCards))
-            return [total, AccountsGroupView(cards: latestCards.sorted(by: sortCards), activeName: activeClaudeCard(in: latestCards)?.card.name)]
+            let cards = latestCards.sorted(by: sortCards)
+            return [total] + paceSummary(cards) + [AccountsGroupView(cards: cards, activeName: activeClaudeCard(in: latestCards)?.card.name)]
         }
     }
 
@@ -5333,45 +5478,13 @@ extension QuotaViewController {
         // The chief (this Mac's own Claude Code login) comes first, then the workers in gdc's order.
         let now = Date()
         let chief = snapshot.chiefUsage.map { [claudexCard($0, now: now, isChief: true)] } ?? []
-        // The Fable room line names the chief too, before the workers, like the cards.
-        let rooms = snapshot.roomLines(now: now, turkish: L.isTurkish).map(makeRoomLine)
-        return [header, AccountsGroupView(cards: chief + snapshot.workers.map { claudexCard($0, now: now) })] + rooms
+        let cards = chief + snapshot.workers.map { claudexCard($0, now: now) }
+        return [header] + paceSummary(cards) + [AccountsGroupView(cards: cards)]
     }
 
-    /// "Fable room: …" under the Claudex list: the label part in the pace's room colour.
-    private func makeRoomLine(_ text: String) -> NSView {
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        let label = NSTextField(wrappingLabelWithString: "")
-        // Non-breaking hyphens, so a wrap never splits a worker name like "gc-worker4".
-        let text = text.replacingOccurrences(of: "-", with: "\u{2011}")
-        let attributed = NSMutableAttributedString(string: text, attributes: [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular),
-            .foregroundColor: Theme.secondaryText
-        ])
-        if let colon = text.range(of: ":") {
-            attributed.addAttributes([
-                .font: NSFont.systemFont(ofSize: 10.5, weight: .semibold),
-                .foregroundColor: Theme.paceRoom
-            ], range: NSRange(text.startIndex..<colon.upperBound, in: text))
-        }
-        // Not selectable: a selected label redraws without its attributes.
-        label.isSelectable = false
-        label.attributedStringValue = attributed
-        label.toolTip = L.text(
-            "Accounts whose week is at least \(WeeklyPace.margin) points behind its pace: quota that would go unused at the reset.",
-            "Haftası tempodan en az \(WeeklyPace.margin) puan geride olan hesaplar: resette boşa gidecek kota."
-        )
-        label.preferredMaxLayoutWidth = UI.cardWidth - 8
-        label.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(label)
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 4),
-            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -4),
-            label.topAnchor.constraint(equalTo: container.topAnchor, constant: 1),
-            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -1)
-        ])
-        return container
+    /// The weekly pace summary over a Claude list, or nothing (`PaceSummaryView.make`).
+    private func paceSummary(_ cards: [QuotaCard]) -> [NSView] {
+        PaceSummaryView.make(cards: cards).map { [$0] } ?? []
     }
 
     /// Updates the status line in place, so starting a probe does not rebuild the cards.
@@ -5436,7 +5549,8 @@ extension QuotaViewController {
             weeklyPace: weekly?.pacePercent,
             modelWeeklyPace: modelWeekly?.pacePercent,
             headline: "\(plan) · \(alias)",
-            note: note
+            note: note,
+            shortName: alias
         )
     }
 

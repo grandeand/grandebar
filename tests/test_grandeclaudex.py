@@ -50,9 +50,7 @@ func describe(_ snapshot: GrandeClaudexSnapshot, now: Date) -> [String: Any] {
         "chief": snapshot.chief ?? NSNull(),
         "chiefUsage": snapshot.chiefUsage.map { describeWorker($0, now: now) } ?? NSNull(),
         "generatedAt": snapshot.generatedAt?.timeIntervalSince1970 ?? NSNull(),
-        "workers": snapshot.workers.map { describeWorker($0, now: now) },
-        "rooms": snapshot.roomLines(now: now, turkish: false),
-        "roomsTurkish": snapshot.roomLines(now: now, turkish: true)
+        "workers": snapshot.workers.map { describeWorker($0, now: now) }
     ]
 }
 
@@ -287,30 +285,6 @@ class GrandeClaudexTests(unittest.TestCase):
         ))["workers"]
         self.assertEqual([r["sevenDayPace"] for r in rows], [43, 43, 43, 43])
 
-    def test_fable_room_line(self):
-        def fable(id, used, resets_in=4 * DAY, **extra):
-            return worker(id=id, alias=id, seven_day=0.3, seven_day_resets_at=NOW + resets_in, seven_day_label="all models",
-                          seven_day_model=used, seven_day_model_resets_at=NOW + resets_in, seven_day_model_label="Fable", **extra)
-        parsed = self.parse(payload(
-            fable("gc-1", 0.07),                      # 7% vs pace 43%: behind
-            fable("gc-2", 0.40),                      # on pace
-            fable("gc-3", 0.90),                      # ahead
-            fable("gc-4", 0.10, logged_in=False),     # not signed in: its limits do not show
-            fable("gc-5", 0.10, resets_in=-60),       # reset passed: no pace
-            worker(id="gc-6", alias="gc-6", seven_day=0.2, seven_day_resets_at=NOW + 4 * DAY, seven_day_label="Fable"),
-        ))
-        self.assertEqual(parsed["rooms"], ["Fable room: gc-1 (7% vs pace 43%), gc-6 (20% vs pace 43%)"])
-        self.assertEqual(parsed["roomsTurkish"], ["Fable için yer var: gc-1 (7% / tempo 43%), gc-6 (20% / tempo 43%)"])
-
-    def test_no_room_line_when_every_fable_week_is_on_pace(self):
-        parsed = self.parse(payload(
-            worker(id="a", seven_day=0.05, seven_day_resets_at=NOW + 4 * DAY, seven_day_label="all models",
-                   seven_day_model=0.4, seven_day_model_resets_at=NOW + 4 * DAY, seven_day_model_label="Fable"),
-            # Far behind on the general weekly only: that is not Fable room.
-            worker(id="b", seven_day=0.0, seven_day_resets_at=NOW + 4 * DAY, seven_day_label="all models"),
-        ))
-        self.assertEqual(parsed["rooms"], [])
-
     def test_chief_weekly_rows_have_a_pace(self):
         # gdc's own pace for the chief is used as it is.
         reported = worker(id="chief", alias="chief", seven_day=0.07, seven_day_resets_at=NOW + 4 * DAY,
@@ -325,19 +299,6 @@ class GrandeClaudexTests(unittest.TestCase):
                           seven_day_model=0.05, seven_day_model_resets_at=NOW + DAY, seven_day_model_label="Fable")
         chief = self.parse(payload(worker(id="a"), chief_usage=computed))["chiefUsage"]
         self.assertEqual((chief["sevenDayPace"], chief["sevenDayModelPace"]), (43, 86))
-
-    def test_fable_room_line_names_the_chief_first(self):
-        def fable(id, used, **extra):
-            return worker(id=id, alias=id, seven_day=0.3, seven_day_resets_at=NOW + 4 * DAY, seven_day_label="all models",
-                          seven_day_model=used, seven_day_model_resets_at=NOW + 4 * DAY, seven_day_model_label="Fable", **extra)
-        parsed = self.parse(payload(fable("gc-1", 0.07), chief_usage=fable("chief", 0.10)))
-        self.assertEqual(parsed["rooms"], ["Fable room: Chief (10% vs pace 43%), gc-1 (7% vs pace 43%)"])
-        self.assertEqual(parsed["roomsTurkish"], ["Fable için yer var: Şef (10% / tempo 43%), gc-1 (7% / tempo 43%)"])
-        # A chief on pace, or one signed out, is left out.
-        self.assertEqual(self.parse(payload(fable("gc-1", 0.07), chief_usage=fable("chief", 0.40)))["rooms"],
-                         ["Fable room: gc-1 (7% vs pace 43%)"])
-        self.assertEqual(self.parse(payload(fable("gc-1", 0.07), chief_usage=fable("chief", 0.10, logged_in=False)))["rooms"],
-                         ["Fable room: gc-1 (7% vs pace 43%)"])
 
     def test_signed_in_account_wins_over_the_configured_one(self):
         rows = self.parse(payload(

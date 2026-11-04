@@ -94,33 +94,6 @@ extension GrandeClaudexSnapshot {
     static func chiefName(turkish: Bool) -> String {
         turkish ? "Şef" : "Chief"
     }
-
-    /// The lines under the Claudex list, one per model-scoped weekly limit ("Fable room: …"),
-    /// naming the signed-in accounts whose model week is clearly behind its pace; empty when none is.
-    /// The chief comes first (as `chiefName`), then the workers in gdc's order, like the cards.
-    /// An account's model week is its `seven_day_model` row, or its weekly row when that is the only
-    /// weekly limit and model-scoped.
-    func roomLines(now: Date = Date(), turkish: Bool) -> [String] {
-        var labels: [String] = []
-        var entries: [String: [WeeklyPace.RoomEntry]] = [:]
-        let chief = chiefUsage.map { [(name: Self.chiefName(turkish: turkish), worker: $0)] } ?? []
-        for (name, worker) in chief + workers.map({ (name: $0.alias, worker: $0) }) where worker.loggedIn {
-            let week: (label: String, window: GrandeClaudexWindow)?
-            if let label = worker.sevenDayModelLabel, let window = worker.sevenDayModelWindow(now: now) {
-                week = (label, window)
-            } else if let label = worker.weeklyModel, let window = worker.sevenDayWindow(now: now) {
-                week = (label, window)
-            } else {
-                week = nil
-            }
-            guard let week else { continue }
-            if entries[week.label] == nil { labels.append(week.label) }
-            entries[week.label, default: []].append(WeeklyPace.RoomEntry(
-                name: name, remainingPercent: week.window.remainingPercent, pacePercent: week.window.pacePercent
-            ))
-        }
-        return labels.compactMap { WeeklyPace.roomLine(label: $0, entries: entries[$0] ?? [], turkish: turkish) }
-    }
 }
 
 /// Reads GrandeClaudex through its `gdc` CLI, which is the only thing that touches the worker

@@ -38,11 +38,18 @@ case "standing":
     result["value"] = WeeklyPace.standing(remainingPercent: int(request["remaining"]), pacePercent: int(request["pace"]))?.rawValue ?? NSNull()
 case "rowText":
     result["value"] = WeeklyPace.rowText(int(request["pace"])!, turkish: request["turkish"] as! Bool)
-case "room":
-    let entries = (request["entries"] as! [[String: Any]]).map {
-        WeeklyPace.RoomEntry(name: $0["name"] as! String, remainingPercent: int($0["remaining"]), pacePercent: int($0["pace"]))
+case "summary":
+    let accounts = (request["accounts"] as! [[String: Any]]).map { account in
+        WeeklyPace.Account(name: account["name"] as! String, rows: (account["rows"] as! [[String: Any]]).map {
+            WeeklyPace.Row(label: $0["label"] as! String, remainingPercent: int($0["remaining"]), pacePercent: int($0["pace"]))
+        })
     }
-    result["value"] = WeeklyPace.roomLine(label: request["label"] as! String, entries: entries, turkish: request["turkish"] as! Bool) ?? NSNull()
+    let summary = WeeklyPace.summary(accounts)
+    func describe(_ entries: [WeeklyPace.Entry]) -> [[String: Any]] {
+        entries.map { ["name": $0.name, "gap": $0.gap, "rows": $0.rows.map { row in row.label },
+                       "tip": WeeklyPace.entryToolTip($0, turkish: false), "tipTurkish": WeeklyPace.entryToolTip($0, turkish: true)] }
+    }
+    result["value"] = ["behind": describe(summary.behind), "ahead": describe(summary.ahead)]
 default:
     exit(2)
 }
@@ -139,23 +146,55 @@ class WeeklyPaceTests(unittest.TestCase):
         self.assertEqual(self.call("rowText", pace=34, turkish=False), "· pace 34%")
         self.assertEqual(self.call("rowText", pace=34, turkish=True), "· tempo 34%")
 
-    def room(self, entries, turkish=False):
-        return self.call("room", label="Fable", entries=entries, turkish=turkish)
+    def summary(self, *accounts):
+        return self.call("summary", accounts=list(accounts))
 
-    def test_room_line_names_the_accounts_behind_their_pace(self):
-        entries = [
-            {"name": "gc-1", "remaining": 93, "pace": 34},   # 7% used: behind
-            {"name": "gc-2", "remaining": 70, "pace": 34},   # 30% used: on pace
-            {"name": "gc-3", "remaining": 90, "pace": 40},   # 10% used: behind
-            {"name": "gc-4", "remaining": 20, "pace": 40},   # ahead
-            {"name": "gc-5", "remaining": 100, "pace": None},
-        ]
-        self.assertEqual(self.room(entries), "Fable room: gc-1 (7% vs pace 34%), gc-3 (10% vs pace 40%)")
-        self.assertEqual(self.room(entries, turkish=True), "Fable için yer var: gc-1 (7% / tempo 34%), gc-3 (10% / tempo 40%)")
+    @staticmethod
+    def account(name, weekly=None, fable=None, pace=43, fable_pace=None):
+        rows = [{"label": "Weekly", "remaining": weekly, "pace": pace}]
+        if fable is not None:
+            rows.append({"label": "Fable", "remaining": fable, "pace": pace if fable_pace is None else fable_pace})
+        return {"name": name, "rows": rows}
 
-    def test_no_room_line_when_no_account_is_behind(self):
-        self.assertIsNone(self.room([{"name": "gc-1", "remaining": 70, "pace": 34}]))
-        self.assertIsNone(self.room([]))
+    def test_summary_splits_the_accounts_behind_and_ahead_of_their_pace(self):
+        result = self.summary(
+            self.account("chief", weekly=81, fable=80),     # 19% / 20% used vs 43%: behind by 24 and 23
+            self.account("trossard", weekly=52, fable=35),  # weekly on pace, Fable 65% used: ahead by 22
+            self.account("vlahovic", weekly=88, fable=90, pace=57),  # behind by 45 and 47
+            self.account("isak", weekly=30, fable=22, pace=57),      # weekly 13 over: on pace; Fable ahead by 21
+            self.account("even", weekly=60, fable=55),
+        )
+        # Widest gap first.
+        self.assertEqual([(e["name"], e["gap"], e["rows"]) for e in result["behind"]],
+                         [("vlahovic", 47, ["Weekly", "Fable"]), ("chief", 24, ["Weekly", "Fable"])])
+        self.assertEqual([(e["name"], e["gap"], e["rows"]) for e in result["ahead"]],
+                         [("trossard", 22, ["Fable"]), ("isak", 21, ["Fable"])])
+
+    def test_summary_tooltips_name_each_row_off_pace(self):
+        result = self.summary(self.account("chief", weekly=81, fable=80), self.account("gc-1", weekly=50, fable=20))
+        chief = result["behind"][0]
+        self.assertEqual(chief["tip"], "Weekly: 19% used, pace 43% · 24 points behind\nFable: 20% used, pace 43% · 23 points behind")
+        self.assertEqual(chief["tipTurkish"], "Weekly: 19% kullanıldı, tempo 43% · 24 puan geride\nFable: 20% kullanıldı, tempo 43% · 23 puan geride")
+        self.assertEqual(result["ahead"][0]["tip"], "Fable: 80% used, pace 43% · 37 points ahead")
+        self.assertEqual(result["ahead"][0]["tipTurkish"], "Fable: 80% kullanıldı, tempo 43% · 37 puan önde")
+
+    def test_an_account_behind_on_one_row_and_ahead_on_the_other_is_in_both(self):
+        result = self.summary(self.account("gc-1", weekly=90, fable=20), self.account("gc-2", weekly=60))
+        self.assertEqual([(e["name"], e["rows"]) for e in result["behind"]], [("gc-1", ["Weekly"])])
+        self.assertEqual([(e["name"], e["rows"]) for e in result["ahead"]], [("gc-1", ["Fable"])])
+
+    def test_equal_gaps_keep_the_list_order(self):
+        result = self.summary(self.account("b", weekly=90), self.account("a", weekly=90), self.account("c", weekly=95))
+        self.assertEqual([e["name"] for e in result["behind"]], ["c", "b", "a"])
+
+    def test_rows_without_a_pace_or_a_value_are_left_out(self):
+        result = self.summary(
+            self.account("no-pace", weekly=95, pace=None),
+            self.account("no-value", weekly=None),
+            self.account("signed-out", weekly=None, fable=None),
+        )
+        self.assertEqual(result, {"behind": [], "ahead": []})
+        self.assertEqual(self.summary(), {"behind": [], "ahead": []})
 
 
 if __name__ == "__main__":
