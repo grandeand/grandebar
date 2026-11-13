@@ -182,11 +182,20 @@ enum ChiefMove {
         }
     }
 
-    /// The account as a confirmation line: "grande1@grandecorpo.com (trossard): 5h 5% · weekly
-    /// 20% (pace 75%) · 55 points behind the pace".
+    /// The account as one line: "grande1@grandecorpo.com (trossard): 5h 5% · weekly 20% (pace
+    /// 75%) · 55 points behind the pace".
     static func line(_ option: Option, turkish: Bool) -> String {
-        let gap = gapText(option.paceGap, turkish: turkish).map { " · " + $0 } ?? ""
-        return "\(option.email) (\(option.worker.alias)): " + numbers(option, turkish: turkish) + gap
+        "\(title(option)): " + detail(option, turkish: turkish)
+    }
+
+    /// "grande1@grandecorpo.com (trossard)"
+    static func title(_ option: Option) -> String {
+        "\(option.email) (\(option.worker.alias))"
+    }
+
+    /// The numbers and the pace gap: "5h 5% · weekly 20% (pace 75%) · 55 points behind the pace".
+    static func detail(_ option: Option, turkish: Bool) -> String {
+        numbers(option, turkish: turkish) + (gapText(option.paceGap, turkish: turkish).map { " · " + $0 } ?? "")
     }
 
     private static func percent(_ value: Int?) -> String {

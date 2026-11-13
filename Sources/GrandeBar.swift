@@ -5676,14 +5676,19 @@ extension QuotaViewController {
     /// `restartsDesktop` puts the running-session warning first and, when Code sessions are
     /// working or waiting, makes Return cancel instead of quitting Desktop.
     private func confirm(_ title: String, _ info: String, button: String, restartsDesktop: Bool = false) -> Bool {
+        let alert = Self.confirmationAlert(title, info, button: button, restartsDesktop: restartsDesktop)
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    private static func confirmationAlert(_ title: String, _ info: String, button: String, restartsDesktop: Bool) -> NSAlert {
         let alert = NSAlert()
         alert.messageText = title
         alert.addButton(withTitle: button)
         alert.addButton(withTitle: L.text("Cancel", "İptal"))
-        alert.informativeText = restartsDesktop ? Self.applyRestartWarning(to: alert, info: info) : info
+        alert.informativeText = restartsDesktop ? applyRestartWarning(to: alert, info: info) : info
         alert.window.appearance = Theme.appAppearance
-        NSApp.activate(ignoringOtherApps: true)
-        return alert.runModal() == .alertFirstButtonReturn
+        return alert
     }
 
     /// Returns `info` with the restart warning on top; styles the alert when work would be lost.
@@ -6171,41 +6176,73 @@ extension QuotaViewController {
         }
     }
 
+    /// What a chief move asks: the confirmation for the target, or why there is nothing to move to.
+    fileprivate enum ChiefMovePrompt {
+        case confirm(alias: String, email: String, title: String, info: String, button: String)
+        /// The chosen login is not a worker's account any more, or Desktop is on it already.
+        case unknown(String)
+        case noTarget
+    }
+
     /// The confirmation names the pick and the runner-up (or the chosen account and the best one)
     /// with their numbers. Confirming turns shared Code sessions on when they are off, so the
     /// chief's conversation follows, and runs the usual account switch.
     private func confirmChiefMove(_ snapshot: GrandeClaudexSnapshot, chosen: String?) {
         let plan = chiefMovePlan(snapshot)
+        let onProxy = ClaudeProviderSwitcher.desktopMode() != .official
+        let sharingOff = !ClaudeSessionSharing.isEnabled
+        switch Self.chiefMovePrompt(plan, chosen: chosen, onProxy: onProxy, sharingOff: sharingOff) {
+        case .noTarget:
+            showNoChiefTarget(plan)
+        case .unknown(let alias):
+            notify(L.text("Cannot move the chief", "Şef taşınamıyor"),
+                   L.text("\(alias) is not a GrandeClaudex Claude worker's account, or Claude Desktop is on it already.",
+                          "\(alias) bir GrandeClaudex Claude worker hesabı değil ya da Claude Desktop zaten bu hesapta."))
+        case .confirm(let alias, let email, let title, let info, let button):
+            guard confirm(title, info, button: button, restartsDesktop: true) else { return }
+            // The switch syncs the sessions while Desktop is closed, so the chief's session is in
+            // the new account's list when Desktop opens.
+            if sharingOff { ClaudeSessionSharing.isEnabled = true }
+            switchDesktopAccount(to: alias, leavingProxy: onProxy) { failure in
+                guard failure == nil else { return }
+                self.recordChiefSeat(email)
+            }
+        }
+    }
+
+    fileprivate static func chiefMovePrompt(_ plan: ChiefMove.Plan, chosen: String?, onProxy: Bool, sharingOff: Bool) -> ChiefMovePrompt {
         let turkish = L.isTurkish
         var lines: [String] = []
+        // "Pick: grande1@… (trossard)" with its numbers on the next line; NSAlert drops a leading
+        // indent, so a blank line parts the accounts.
+        func describe(_ label: String, _ option: ChiefMove.Option) {
+            if !lines.isEmpty { lines.append("") }
+            lines.append(label + ChiefMove.title(option))
+            lines.append(ChiefMove.detail(option, turkish: turkish))
+        }
         let target: ChiefMove.Option
         if let chosen {
-            guard let option = (plan.candidates + plan.skipped).first(where: { $0.account?.alias == chosen }) else {
-                notify(L.text("Cannot move the chief", "Şef taşınamıyor"),
-                       L.text("\(chosen) is not a GrandeClaudex Claude worker's account, or Claude Desktop is on it already.",
-                              "\(chosen) bir GrandeClaudex Claude worker hesabı değil ya da Claude Desktop zaten bu hesapta."))
-                return
-            }
+            guard let option = (plan.candidates + plan.skipped).first(where: { $0.account?.alias == chosen }) else { return .unknown(chosen) }
             target = option
-            lines.append(L.text("Chosen: ", "Seçilen: ") + ChiefMove.line(option, turkish: turkish))
+            describe(L.text("Chosen: ", "Seçilen: "), option)
             if option.skip != nil {
                 lines.append("⚠️ " + L.text("No room now: ", "Şu an yer yok: ") + ChiefMove.skipText(option, turkish: turkish))
             }
             if let best = plan.pick, best.account?.alias != chosen {
-                lines.append(L.text("Best pick: ", "En uygun: ") + ChiefMove.line(best, turkish: turkish))
+                describe(L.text("Best pick: ", "En uygun: "), best)
             }
         } else {
-            guard let pick = plan.pick else {
-                showNoChiefTarget(plan)
-                return
-            }
+            guard let pick = plan.pick else { return .noTarget }
             target = pick
-            lines.append(L.text("Pick: ", "Seçilen: ") + ChiefMove.line(pick, turkish: turkish))
-            lines.append(L.text("Runner-up: ", "Yedek: ") + (plan.runnerUp.map { ChiefMove.line($0, turkish: turkish) } ?? L.text("none", "yok")))
+            describe(L.text("Pick: ", "Seçilen: "), pick)
+            if let runnerUp = plan.runnerUp {
+                describe(L.text("Runner-up: ", "Yedek: "), runnerUp)
+            } else {
+                lines += ["", L.text("Runner-up: none", "Yedek: yok")]
+            }
         }
-        guard let alias = target.account?.alias else { return }
+        guard let alias = target.account?.alias else { return .unknown(target.email) }
         let email = target.email
-        let onProxy = ClaudeProviderSwitcher.desktopMode() != .official
         lines.append("")
         if onProxy {
             lines.append(L.text("Claude Desktop leaves CLIProxy and comes back on claude.ai as \(alias).",
@@ -6215,7 +6252,6 @@ extension QuotaViewController {
             "Claude Desktop switches to \(alias) and the chief's Code session goes on there. GrandeClaudex then records \(email) as the chief seat and sends no worker to it.",
             "Claude Desktop \(alias) hesabına geçer, şefin Code oturumu orada sürer. Ardından GrandeClaudex \(email) hesabını şef koltuğu olarak kaydeder ve ona worker göndermez."
         ))
-        let sharingOff = !ClaudeSessionSharing.isEnabled
         if sharingOff {
             lines.append("")
             lines.append(L.text(
@@ -6223,21 +6259,25 @@ extension QuotaViewController {
                 "Ortak Code oturumları kapalı: şefin sohbeti \(alias) hesabına geçebilsin diye önce açılır. Bundan sonra tüm Desktop hesapları aynı Code oturumlarını listeler."
             ))
         }
-        let button = sharingOff ? L.text("Share Sessions and Move", "Oturumları paylaş ve taşı") : L.text("Move the Chief", "Şefi taşı")
-        guard confirm(L.text("Move the chief to \(email)?", "Şef \(email) hesabına taşınsın mı?"),
-                      lines.joined(separator: "\n"), button: button, restartsDesktop: true) else { return }
-        // The switch syncs the sessions while Desktop is closed, so the chief's session is in the
-        // new account's list when Desktop opens.
-        if sharingOff { ClaudeSessionSharing.isEnabled = true }
-        switchDesktopAccount(to: alias, leavingProxy: onProxy) { failure in
-            guard failure == nil else { return }
-            self.recordChiefSeat(email)
-        }
+        return .confirm(
+            alias: alias, email: email,
+            title: L.text("Move the chief to \(email)?", "Şef \(email) hesabına taşınsın mı?"),
+            info: lines.joined(separator: "\n"),
+            button: sharingOff ? L.text("Share Sessions and Move", "Oturumları paylaş ve taşı") : L.text("Move the Chief", "Şefi taşı")
+        )
     }
 
     /// No saved login has room: why each saved worker account was skipped, and which worker
     /// accounts with room to add with "Add Account…" first.
     private func showNoChiefTarget(_ plan: ChiefMove.Plan) {
+        let alert = Self.noChiefTargetAlert(plan, canAdd: ClaudeProviderSwitcher.desktopMode() == .official)
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn, alert.buttons.count == 2 {
+            addDesktopAccount()
+        }
+    }
+
+    fileprivate static func noChiefTargetAlert(_ plan: ChiefMove.Plan, canAdd: Bool) -> NSAlert {
         let turkish = L.isTurkish
         var lines: [String] = []
         if plan.skipped.isEmpty {
@@ -6255,20 +6295,20 @@ extension QuotaViewController {
         } else {
             lines.append(L.text("These worker accounts have room; add them with Add Account… first:",
                                 "Şu worker hesaplarında yer var; önce Hesap ekle… ile ekle:"))
-            lines += plan.missing.map { "• " + ChiefMove.line($0, turkish: turkish) }
+            for option in plan.missing {
+                lines.append("• " + ChiefMove.title(option))
+                lines.append(ChiefMove.detail(option, turkish: turkish))
+            }
         }
         let alert = NSAlert()
         alert.messageText = L.text("No account to move the chief to", "Şefi taşıyacak hesap yok")
         alert.informativeText = lines.joined(separator: "\n")
-        if !plan.missing.isEmpty, ClaudeProviderSwitcher.desktopMode() == .official {
+        if !plan.missing.isEmpty, canAdd {
             alert.addButton(withTitle: L.text("Add Account…", "Hesap ekle…"))
         }
         alert.addButton(withTitle: L.text("OK", "Tamam"))
         alert.window.appearance = Theme.appAppearance
-        NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn, alert.buttons.count == 2 {
-            addDesktopAccount()
-        }
+        return alert
     }
 
     /// Tells GrandeClaudex where the chief runs now, then shows the Remote Control note; a missing
@@ -6298,6 +6338,15 @@ extension QuotaViewController {
     private func showChiefMovedNote(email: String, problem: String?) {
         let hidden = UserDefaults.standard.bool(forKey: AppConfig.chiefMoveNoteHiddenKey)
         guard !hidden || problem != nil else { return }
+        let alert = Self.chiefMovedNoteAlert(email: email, problem: problem, hidden: hidden)
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+        if alert.suppressionButton?.state == .on {
+            UserDefaults.standard.set(true, forKey: AppConfig.chiefMoveNoteHiddenKey)
+        }
+    }
+
+    fileprivate static func chiefMovedNoteAlert(email: String, problem: String?, hidden: Bool) -> NSAlert {
         let alert = NSAlert()
         if hidden {
             alert.messageText = L.text("The chief moved to \(email)", "Şef \(email) hesabına taşındı")
@@ -6311,11 +6360,7 @@ extension QuotaViewController {
         }
         alert.informativeText = problem.map { "⚠️ " + $0 } ?? ""
         alert.window.appearance = Theme.appAppearance
-        NSApp.activate(ignoringOtherApps: true)
-        alert.runModal()
-        if alert.suppressionButton?.state == .on {
-            UserDefaults.standard.set(true, forKey: AppConfig.chiefMoveNoteHiddenKey)
-        }
+        return alert
     }
 
     // MARK: Code session sharing
