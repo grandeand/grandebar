@@ -72,6 +72,19 @@ case "fetch":
     case .failure(.timedOut): emit(["failure": "timedOut"])
     case .failure(.failed(let message)): emit(["failure": "failed", "message": message])
     }
+case "seat", "setSeat":
+    let result = arguments[1] == "seat"
+        ? GrandeClaudexCLI.chiefSeat(executable: arguments[2])
+        : GrandeClaudexCLI.setChiefSeat(arguments[3], executable: arguments[2])
+    switch result {
+    case .success(let seat):
+        emit(["ok": ["email": seat.email, "worker": seat.worker ?? NSNull(), "name": seat.name ?? NSNull(),
+                     "since": seat.since?.timeIntervalSince1970 ?? NSNull()] as [String: Any]])
+    case .failure(.notInstalled): emit(["failure": "notInstalled"])
+    case .failure(.unreadable): emit(["failure": "unreadable"])
+    case .failure(.timedOut): emit(["failure": "timedOut"])
+    case .failure(.failed(let message)): emit(["failure": "failed", "message": message])
+    }
 case "locate":
     let found: Any = GrandeClaudexCLI.locate(home: arguments[2], path: arguments[3]) ?? NSNull()
     emit(["gdc": found])
@@ -419,6 +432,40 @@ class GrandeClaudexTests(unittest.TestCase):
         (bins / "plain" / "gdc").chmod(0o644)
         # Relative PATH entries are skipped, so a gdc in the working directory does not count.
         self.assertIsNone(self.locate(home, f"{bins / 'dir'}:{bins / 'plain'}::bins"))
+
+    def seat(self, executable, set_email=None):
+        arguments = ["seat", str(executable)] if set_email is None else ["setSeat", str(executable), set_email]
+        result = subprocess.run([str(self.binary), *arguments], check=True, capture_output=True, text=True)
+        return json.loads(result.stdout)
+
+    def test_chief_seat_is_read_and_set_through_gdc(self):
+        calls = self.work / "seat-calls.txt"
+        calls.unlink(missing_ok=True)
+        body = json.dumps({"email": "grande1@grandecorpo.com", "worker": "gc-grande1", "name": "Trossard",
+                           "since": "2026-11-13T17:14:58.192827+00:00"})
+        gdc = self.fake_gdc(f"echo \"$@\" >> '{calls}'\ncat <<'EOF'\n{body}\nEOF\n")
+        seat = self.seat(gdc)["ok"]
+        self.assertEqual({key: seat[key] for key in ("email", "worker", "name")},
+                         {"email": "grande1@grandecorpo.com", "worker": "gc-grande1", "name": "Trossard"})
+        self.assertAlmostEqual(seat["since"], 1794590098.19, places=1)
+        self.assertEqual(self.seat(gdc, "grande1@grandecorpo.com")["ok"]["email"], "grande1@grandecorpo.com")
+        self.assertEqual(calls.read_text().splitlines(), [
+            "chief-seat --json",
+            "chief-seat --set grande1@grandecorpo.com --source grandebar --json",
+        ])
+
+    def test_chief_seat_failures(self):
+        self.assertEqual(self.seat(self.work / "missing-gdc"), {"failure": "notInstalled"})
+        self.assertEqual(self.seat(self.work / "missing-gdc", "a@b.com"), {"failure": "notInstalled"})
+        # An older gdc without the chief-seat command.
+        old = self.fake_gdc("echo \"gdc: error: argument command: invalid choice: 'chief-seat'\" >&2\nexit 2\n")
+        self.assertEqual(self.seat(old, "a@b.com"),
+                         {"failure": "failed", "message": "gdc: error: argument command: invalid choice: 'chief-seat'"})
+        # A seat without an email (or not JSON at all) cannot be shown.
+        empty = self.fake_gdc("echo '{\"email\": null, \"worker\": null}'\n")
+        self.assertEqual(self.seat(empty), {"failure": "unreadable"})
+        seat_only = self.fake_gdc("echo '{\"email\": \"samet@grandecorpo.com\"}'\n")
+        self.assertEqual(self.seat(seat_only), {"ok": {"email": "samet@grandecorpo.com", "worker": None, "name": None, "since": None}})
 
     def tabs(self, stored, installed):
         result = subprocess.run(

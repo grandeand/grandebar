@@ -21,6 +21,7 @@ swiftc \
   "$ROOT/Sources/ClaudeSessionSharing.swift" \
   "$ROOT/Sources/ClaudeDesktopToken.swift" \
   "$ROOT/Sources/GrandeClaudex.swift" \
+  "$ROOT/Sources/ChiefMove.swift" \
   "$ROOT/Sources/ClaudeLimitsTab.swift" \
   "$ROOT/Sources/WeeklyPace.swift" \
   "$ROOT/Sources/LocalCosts.swift" \

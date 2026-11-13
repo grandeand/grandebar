@@ -96,6 +96,17 @@ extension GrandeClaudexSnapshot {
     }
 }
 
+/// The chief seat: the account Claude Desktop runs the GrandeClaudex chief on, from
+/// `gdc chief-seat --json`. GrandeClaudex sends no worker to it.
+struct GrandeClaudexSeat: Equatable {
+    let email: String
+    /// The Claude worker whose account it is (`gc-grande1`), nil for an account no worker uses.
+    let worker: String?
+    /// That worker's display name ("Trossard").
+    let name: String?
+    let since: Date?
+}
+
 /// Reads GrandeClaudex through its `gdc` CLI, which is the only thing that touches the worker
 /// credentials: GrandeBar never opens them itself.
 enum GrandeClaudexCLI {
@@ -172,13 +183,40 @@ enum GrandeClaudexCLI {
     /// limits again first. Blocks until gdc exits or the timeout stops it, so call it off the main
     /// thread.
     static func fetch(probe: Bool, executable: String? = nil, timeout: TimeInterval? = nil) -> Result<GrandeClaudexSnapshot, Failure> {
+        run(["usage", "--json"] + (probe ? ["--probe"] : []), executable: executable, timeout: timeout ?? defaultTimeout(probe: probe))
+            .flatMap { data in parse(data).map { .success($0) } ?? .failure(.unreadable) }
+    }
+
+    /// `gdc chief-seat --json`: the account Claude Desktop runs the chief on. Blocking.
+    static func chiefSeat(executable: String? = nil, timeout: TimeInterval = 20) -> Result<GrandeClaudexSeat, Failure> {
+        run(["chief-seat", "--json"], executable: executable, timeout: timeout)
+            .flatMap { data in parseSeat(data).map { .success($0) } ?? .failure(.unreadable) }
+    }
+
+    /// `gdc chief-seat --set <email> --source grandebar --json`, right after GrandeBar moved the
+    /// chief, so GrandeClaudex sends no worker to that account from then on. Blocking.
+    static func setChiefSeat(_ email: String, executable: String? = nil, timeout: TimeInterval = 20) -> Result<GrandeClaudexSeat, Failure> {
+        run(["chief-seat", "--set", email, "--source", "grandebar", "--json"], executable: executable, timeout: timeout)
+            .flatMap { data in parseSeat(data).map { .success($0) } ?? .failure(.unreadable) }
+    }
+
+    /// `chief-seat --json`'s record; nil without an email.
+    static func parseSeat(_ data: Data) -> GrandeClaudexSeat? {
+        guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let email = nonEmpty(json["email"]) else { return nil }
+        return GrandeClaudexSeat(email: email, worker: nonEmpty(json["worker"]), name: nonEmpty(json["name"]), since: date(json["since"]))
+    }
+
+    /// Runs gdc with `arguments` and returns what it printed. Blocks until gdc exits or the
+    /// timeout stops it, so call it off the main thread.
+    private static func run(_ arguments: [String], executable: String?, timeout: TimeInterval) -> Result<Data, Failure> {
         guard let executable = executable ?? locate(), FileManager.default.isExecutableFile(atPath: executable) else {
             return .failure(.notInstalled)
         }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = ["usage", "--json"] + (probe ? ["--probe"] : [])
+        process.arguments = arguments
         // gdc is a script that looks up its interpreter.
         var environment = ProcessInfo.processInfo.environment
         environment["PATH"] = searchPath(path: environment["PATH"]).joined(separator: ":")
@@ -203,7 +241,7 @@ enum GrandeClaudexCLI {
         DispatchQueue.global(qos: .utility).async(group: drained) { data = output.fileHandleForReading.readDataToEndOfFile() }
         DispatchQueue.global(qos: .utility).async(group: drained) { errorData = errors.fileHandleForReading.readDataToEndOfFile() }
 
-        if exited.wait(timeout: .now() + (timeout ?? defaultTimeout(probe: probe))) == .timedOut {
+        if exited.wait(timeout: .now() + timeout) == .timedOut {
             process.terminate()
             if exited.wait(timeout: .now() + 3) == .timedOut, process.isRunning {
                 kill(process.processIdentifier, SIGKILL)
@@ -221,8 +259,7 @@ enum GrandeClaudexCLI {
                 .map { String($0.trimmingCharacters(in: .whitespaces).prefix(200)) }
             return .failure(.failed(message ?? "gdc exited with \(process.terminationStatus)"))
         }
-        guard let snapshot = parse(data) else { return .failure(.unreadable) }
-        return .success(snapshot)
+        return .success(data)
     }
 
     private static func nonEmpty(_ value: Any?) -> String? {
