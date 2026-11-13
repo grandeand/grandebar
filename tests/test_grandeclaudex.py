@@ -10,7 +10,8 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = [ROOT / "Sources" / "GrandeClaudex.swift", ROOT / "Sources" / "ClaudeLimitsTab.swift", ROOT / "Sources" / "WeeklyPace.swift"]
+SOURCES = [ROOT / "Sources" / "GrandeClaudex.swift", ROOT / "Sources" / "ClaudeLimitsTab.swift", ROOT / "Sources" / "WeeklyPace.swift",
+           ROOT / "Sources" / "ClaudeLimitResets.swift"]
 
 HARNESS = """
 import Foundation
@@ -41,7 +42,9 @@ func describeWorker(_ worker: GrandeClaudexWorker, now: Date) -> [String: Any] {
         "sevenDayPace": worker.sevenDayWindow(now: now)?.pacePercent ?? NSNull(),
         "sevenDayModelPace": worker.sevenDayModelWindow(now: now)?.pacePercent ?? NSNull(),
         "checkedAt": worker.checkedAt?.timeIntervalSince1970 ?? NSNull(),
-        "error": worker.error ?? NSNull()
+        "error": worker.error ?? NSNull(),
+        "resetCredits": worker.limitResets(now: now).map { $0.count as Any } ?? NSNull(),
+        "resetExpiries": worker.limitResets(now: now).map { $0.expiries.map(\\.timeIntervalSince1970) as Any } ?? NSNull()
     ]
 }
 
@@ -312,6 +315,40 @@ class GrandeClaudexTests(unittest.TestCase):
                           seven_day_model=0.05, seven_day_model_resets_at=NOW + DAY, seven_day_model_label="Fable")
         chief = self.parse(payload(worker(id="a"), chief_usage=computed))["chiefUsage"]
         self.assertEqual((chief["sevenDayPace"], chief["sevenDayModelPace"]), (43, 86))
+
+    def test_old_gdc_without_reset_fields_leaves_the_count_unknown(self):
+        row = self.parse(payload(worker()))["workers"][0]
+        self.assertIsNone(row["resetCredits"])
+        self.assertIsNone(row["resetExpiries"])
+
+    def test_reset_credits_and_their_expiries_are_read(self):
+        rows = self.parse(payload(
+            worker(id="two", reset_credits=2, reset_credit_expiries=[NOW + 9 * DAY, NOW + 2 * DAY]),
+            worker(id="none", reset_credits=0, reset_credit_expiries=[]),
+            worker(id="null", reset_credits=None, reset_credit_expiries=None),
+            worker(id="no-end", reset_credits=1),
+        ))["workers"]
+        self.assertEqual([r["resetCredits"] for r in rows], [2, 0, None, 1])
+        # Soonest first, whatever order gdc sends.
+        self.assertEqual(rows[0]["resetExpiries"], [NOW + 2 * DAY, NOW + 9 * DAY])
+        self.assertEqual(rows[1]["resetExpiries"], [])
+        self.assertEqual(rows[3]["resetExpiries"], [])
+
+    def test_a_reset_that_ran_out_since_the_read_is_gone(self):
+        row = self.parse(payload(worker(reset_credits=3, reset_credit_expiries=[NOW - 60, NOW + DAY])))["workers"][0]
+        self.assertEqual(row["resetCredits"], 2)
+        self.assertEqual(row["resetExpiries"], [NOW + DAY])
+
+    def test_unusable_reset_counts_stay_unknown(self):
+        rows = self.parse(payload(
+            worker(id="bool", reset_credits=True),
+            worker(id="text", reset_credits="2"),
+            worker(id="negative", reset_credits=-1),
+            worker(id="fraction", reset_credits=1.5),
+            worker(id="whole-float", reset_credits=2.0, reset_credit_expiries=["soon", None, NOW + DAY]),
+        ))["workers"]
+        self.assertEqual([r["resetCredits"] for r in rows], [None, None, None, None, 2])
+        self.assertEqual(rows[4]["resetExpiries"], [NOW + DAY])
 
     def test_signed_in_account_wins_over_the_configured_one(self):
         rows = self.parse(payload(

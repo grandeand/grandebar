@@ -27,6 +27,11 @@ struct GrandeClaudexWorker: Equatable {
     let sevenDayModelPace: Double?
     let checkedAt: Date?
     let error: String?
+    /// The account's limit resets as gdc reads them (`reset_credits`, and `reset_credit_expiries`:
+    /// epoch seconds, one per reset that has an end). A gdc that does not report them leaves the
+    /// count nil, which the cards show as unknown, never as 0.
+    var resetCredits: Int? = nil
+    var resetCreditExpiries: [Date] = []
 }
 
 /// A limit window as the cards show it: what is left, not what is used.
@@ -65,6 +70,11 @@ extension GrandeClaudexWorker {
 
     func sevenDayModelWindow(now: Date = Date()) -> GrandeClaudexWindow? {
         GrandeClaudexWindow(used: sevenDayModel, resetsAt: sevenDayModelResetsAt, now: now, weekly: true, reportedPace: sevenDayModelPace)
+    }
+
+    /// The resets gdc last read, without those that ran out since; nil when gdc reports none.
+    func limitResets(now: Date = Date()) -> ClaudeLimitResets? {
+        ClaudeLimitResets.stored(count: resetCredits, expiries: resetCreditExpiries, now: now)
     }
 
     /// The plan as the Desktop chip writes it: "team" → "Team".
@@ -175,7 +185,9 @@ enum GrandeClaudexCLI {
             sevenDayModelLabel: nonEmpty(row["seven_day_model_label"]),
             sevenDayModelPace: number(row["seven_day_model_pace"]),
             checkedAt: date(row["checked_at"]),
-            error: nonEmpty(row["error"])
+            error: nonEmpty(row["error"]),
+            resetCredits: count(row["reset_credits"]),
+            resetCreditExpiries: ((row["reset_credit_expiries"] as? [Any]) ?? []).compactMap(epoch).sorted()
         )
     }
 
@@ -273,6 +285,12 @@ enum GrandeClaudexCLI {
         guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
               number.doubleValue.isFinite else { return nil }
         return number.doubleValue
+    }
+
+    /// A whole number of at least 0, else nil.
+    private static func count(_ value: Any?) -> Int? {
+        guard let value = number(value), value >= 0, value == value.rounded(), value < Double(Int.max) else { return nil }
+        return Int(value)
     }
 
     private static func flag(_ value: Any?) -> Bool {

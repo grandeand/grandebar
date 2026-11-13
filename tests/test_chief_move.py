@@ -7,7 +7,8 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCES = [ROOT / "Sources" / "ChiefMove.swift", ROOT / "Sources" / "GrandeClaudex.swift", ROOT / "Sources" / "WeeklyPace.swift"]
+SOURCES = [ROOT / "Sources" / "ChiefMove.swift", ROOT / "Sources" / "GrandeClaudex.swift", ROOT / "Sources" / "WeeklyPace.swift",
+           ROOT / "Sources" / "ClaudeLimitResets.swift"]
 
 HARNESS = """
 import Foundation
