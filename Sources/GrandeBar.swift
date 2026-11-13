@@ -1576,8 +1576,10 @@ final class QuotaViewController: NSViewController {
     /// Primary header line (classic, short): `6 account · 12 reset`
     private func summaryText(for cards: [QuotaCard]) -> String {
         if AppConfig.mode() == .claude {
-            // Plans are on each row's chip; the header stays short enough for the detail part.
-            return L.text("\(cards.count) account", "\(cards.count) hesap")
+            // Plans are on each row's chip; the header stays short enough for the detail part. The
+            // reset total shows once an account's count is known (Claude's limit resets).
+            let resets = ClaudeLimitResets.headerSuffix(cards.map(\.resetCreditsAvailableCount))
+            return L.text("\(cards.count) account\(resets)", "\(cards.count) hesap\(resets)")
         }
         let resetTotal = cards.compactMap(\.resetCreditsAvailableCount).reduce(0, +)
         return L.text("\(cards.count) account · \(resetTotal) reset", "\(cards.count) hesap · \(resetTotal) reset")
@@ -1756,9 +1758,14 @@ final class QuotaViewController: NSViewController {
             }
             .joined(separator: "\n")
         if AppConfig.mode() == .claude {
+            // The limit resets as in Codex mode, once an account's count is known.
+            let counts = latestCards.compactMap(\.resetCreditsAvailableCount)
+            let closest = earliestResetExpiry(in: latestCards).map { "\(formatExpiry($0.date)) (\(compactAccountName($0.name)))" } ?? "--"
+            let resets = counts.isEmpty ? "" : L.text(" Reset credits: \(counts.reduce(0, +)), nearest expiry: \(closest).",
+                                                      " Reset hakkı: \(counts.reduce(0, +)), en yakın expire: \(closest).")
             return L.text(
-                "\(usageLine)\nClaude remaining total: session \(sessionPoolTitle(summary)), weekly \(weeklyTotal)\(modelTotal).\nAccount remaining:\n\(accounts)",
-                "\(usageLine)\nClaude toplam kalan: oturum \(sessionPoolTitle(summary)), haftalık \(weeklyTotal)\(modelTotal).\nHesaplarda kalan:\n\(accounts)"
+                "\(usageLine)\nClaude remaining total: session \(sessionPoolTitle(summary)), weekly \(weeklyTotal)\(modelTotal).\(resets)\nAccount remaining:\n\(accounts)",
+                "\(usageLine)\nClaude toplam kalan: oturum \(sessionPoolTitle(summary)), haftalık \(weeklyTotal)\(modelTotal).\(resets)\nHesaplarda kalan:\n\(accounts)"
             )
         }
         let resetTotal = latestCards.compactMap(\.resetCreditsAvailableCount).reduce(0, +)
@@ -2074,6 +2081,9 @@ private final class AccountCardView: NSView {
         name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let chip = ChipView(text: chipText(card), tint: Theme.accent)
+        if card.headline != nil {
+            chip.toolTip = ClaudeLimitResets.chipToolTip(count: card.resetCreditsAvailableCount, turkish: L.isTurkish)
+        }
 
         let session = MetricView(title: L.text("5h", "5 saat"), percent: card.sessionPercent, resetSeconds: card.sessionResetSeconds)
         let weekly = MetricView(title: card.weeklyLabel ?? L.text("Weekly", "Haftalık"), percent: card.weeklyPercent, resetSeconds: card.weeklyResetSeconds,
@@ -2096,10 +2106,13 @@ private final class AccountCardView: NSView {
         footer.toolTip = card.note
         footer.translatesAutoresizingMaskIntoConstraints = false
 
-        // The chief card's seat line and its button sit between the rows and the footer.
+        // Claude's reset line, then the chief card's seat line and its button, sit between the
+        // rows and the footer.
+        let resetLine = Self.resetLine(card)
         let seat = (card.seatLine != nil || card.action != nil) ? Self.seatRow(card) : nil
+        let lastRow = rows[rows.count - 1]
 
-        ([name, chip, footer] + rows + [seat].compactMap { $0 }).forEach(addSubview)
+        ([name, chip, footer] + rows + [resetLine, seat].compactMap { $0 }).forEach(addSubview)
 
         var constraints = [
             name.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
@@ -2111,14 +2124,21 @@ private final class AccountCardView: NSView {
 
             footer.leadingAnchor.constraint(equalTo: session.leadingAnchor),
             footer.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
-            footer.topAnchor.constraint(equalTo: (seat ?? rows[rows.count - 1]).bottomAnchor, constant: 6),
+            footer.topAnchor.constraint(equalTo: (seat ?? resetLine ?? lastRow).bottomAnchor, constant: 6),
             footer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -11)
         ]
+        if let resetLine {
+            constraints += [
+                resetLine.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+                resetLine.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
+                resetLine.topAnchor.constraint(equalTo: lastRow.bottomAnchor, constant: 6)
+            ]
+        }
         if let seat {
             constraints += [
                 seat.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
                 seat.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-                seat.topAnchor.constraint(equalTo: rows[rows.count - 1].bottomAnchor, constant: 6)
+                seat.topAnchor.constraint(equalTo: (resetLine ?? lastRow).bottomAnchor, constant: 6)
             ]
         }
         for (index, row) in rows.enumerated() {
@@ -2139,6 +2159,20 @@ private final class AccountCardView: NSView {
 
     private func compactName(_ value: String) -> String {
         value.replacingOccurrences(of: "-team", with: "")
+    }
+
+    /// Claude mode's "Reset 2 · first credit expires Nov 20 14:00" (Codex mode has the count on its
+    /// chip and the expiry in the footer); nil while the account holds no reset.
+    private static func resetLine(_ card: QuotaCard) -> NSView? {
+        guard card.headline != nil,
+              let text = ClaudeLimitResets.cardLine(count: card.resetCreditsAvailableCount, expiries: card.resetCreditExpiries,
+                                                    turkish: L.isTurkish, format: ClaudeAPI.formatDate) else { return nil }
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 10.5, weight: .regular)
+        label.textColor = Theme.secondaryText
+        label.lineBreakMode = .byTruncatingTail
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
     }
 
     /// "Seat: Trossard · grande1@…" and, at its end, the card's button.
@@ -3789,7 +3823,7 @@ private final class QuotaAPI {
 
     private func fetchClaudeUsage(authIndex: String, file: [String: Any], managementKey: String, completion: @escaping (Result<QuotaCard, Error>) -> Void) {
         let name = (file["email"] as? String) ?? (file["account"] as? String) ?? (file["name"] as? String) ?? authIndex
-        claudeCall(authIndex: authIndex, url: ClaudeAPI.usageURL, managementKey: managementKey) { usageResult in
+        claudeCall(authIndex: authIndex, url: ClaudeAPI.usageWithResetsURL, managementKey: managementKey) { usageResult in
             switch usageResult {
             case .failure(let error):
                 Self.claudeCacheLock.lock()
@@ -3820,6 +3854,7 @@ private final class QuotaAPI {
             case .success(let usage):
                 self.claudePlan(authIndex: authIndex, managementKey: managementKey) { plan in
                     let quota = ClaudeQuota.parse(usage)
+                    let resets = ClaudeLimitResets.parse(usage)
                     let card = QuotaCard(
                         name: name,
                         plan: plan,
@@ -3827,8 +3862,8 @@ private final class QuotaAPI {
                         sessionResetSeconds: quota.sessionResetSeconds,
                         weeklyPercent: quota.weeklyRemaining,
                         weeklyResetSeconds: quota.weeklyResetSeconds,
-                        resetCreditsAvailableCount: nil,
-                        resetCreditExpiries: [],
+                        resetCreditsAvailableCount: resets?.count,
+                        resetCreditExpiries: resets?.expiries ?? [],
                         allowed: nil,
                         limitReached: quota.limitReached,
                         updatedAt: Date(),
@@ -4062,6 +4097,9 @@ private final class QuotaAPI {
 
 private enum ClaudeAPI {
     static let usageURL = "https://api.anthropic.com/api/oauth/usage"
+    /// The same usage answer plus the account's limit resets (`cedar_ember`), asked exactly the way
+    /// Claude Code asks for them; the cards read their limits and their resets from this one call.
+    static let usageWithResetsURL = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1"
     static let profileURL = "https://api.anthropic.com/api/oauth/profile"
     static let messagesURL = "https://api.anthropic.com/v1/messages?beta=true"
     static let warmModel = "claude-haiku-5-5"
@@ -4130,6 +4168,9 @@ private enum DesktopUsageCache {
         var modelWeeklyLabel: String?
         var modelWeeklyPercent: Int?
         var modelWeeklyResetAt: Date?
+        /// The limit resets (`ClaudeLimitResets`); nil in a read stored before GrandeBar asked for them.
+        var resetCount: Int?
+        var resetExpiries: [Date]?
         var fetchedAt: Date
     }
 
@@ -4145,6 +4186,8 @@ private enum DesktopUsageCache {
             modelWeeklyLabel: card.modelWeeklyLabel,
             modelWeeklyPercent: card.modelWeeklyPercent,
             modelWeeklyResetAt: card.modelWeeklyResetSeconds.map { card.updatedAt.addingTimeInterval(TimeInterval($0)) },
+            resetCount: card.resetCreditsAvailableCount,
+            resetExpiries: card.resetCreditsAvailableCount == nil ? nil : card.resetCreditExpiries,
             fetchedAt: card.updatedAt
         )
         if let data = try? JSONEncoder().encode(entries) {
@@ -4163,11 +4206,12 @@ private enum DesktopUsageCache {
         let session = project(entry.sessionPercent, entry.sessionResetAt)
         let weekly = project(entry.weeklyPercent, entry.weeklyResetAt)
         let modelWeekly = project(entry.modelWeeklyPercent, entry.modelWeeklyResetAt)
+        let resets = ClaudeLimitResets.stored(count: entry.resetCount, expiries: entry.resetExpiries, now: now)
         return QuotaCard(
             name: entry.name, plan: entry.plan,
             sessionPercent: session.percent, sessionResetSeconds: session.seconds,
             weeklyPercent: weekly.percent, weeklyResetSeconds: weekly.seconds,
-            resetCreditsAvailableCount: nil, resetCreditExpiries: [],
+            resetCreditsAvailableCount: resets?.count, resetCreditExpiries: resets?.expiries ?? [],
             allowed: nil, limitReached: nil, updatedAt: now,
             weeklyLabel: entry.weeklyLabel,
             modelWeeklyLabel: entry.modelWeeklyLabel,
@@ -4238,14 +4282,15 @@ private enum DesktopUsage {
         let plan = profile?.plan ?? "Claude"
         let name = profile?.email ?? fallbackName
 
-        switch request(ClaudeAPI.usageURL, token: token) {
+        switch request(ClaudeAPI.usageWithResetsURL, token: token) {
         case .success(let usage):
             let quota = ClaudeQuota.parse(usage)
+            let resets = ClaudeLimitResets.parse(usage)
             let card = QuotaCard(
                 name: name, plan: plan,
                 sessionPercent: quota.sessionRemaining, sessionResetSeconds: quota.sessionResetSeconds,
                 weeklyPercent: quota.weeklyRemaining, weeklyResetSeconds: quota.weeklyResetSeconds,
-                resetCreditsAvailableCount: nil, resetCreditExpiries: [],
+                resetCreditsAvailableCount: resets?.count, resetCreditExpiries: resets?.expiries ?? [],
                 allowed: nil, limitReached: quota.limitReached, updatedAt: Date(),
                 weeklyLabel: quota.weeklyLabel,
                 modelWeeklyLabel: quota.modelWeeklyLabel,
@@ -5582,13 +5627,16 @@ extension QuotaViewController {
             failed = true
         } else if let snapshot = claudex {
             let signedIn = snapshot.workers.filter(\.loggedIn).count
+            let now = Date()
+            let resets = ClaudeLimitResets.headerSuffix(([snapshot.chiefUsage].compactMap { $0 } + snapshot.workers)
+                .map { $0.loggedIn ? $0.limitResets(now: now)?.count : nil })
             if let chief = snapshot.chiefUsage {
                 let total = signedIn + (chief.loggedIn ? 1 : 0)
-                text = L.text("Chief + \(snapshot.workers.count) Claude workers · \(total) signed in",
-                              "Şef + \(snapshot.workers.count) Claude worker · \(total) oturum açık")
+                text = L.text("Chief + \(snapshot.workers.count) Claude workers · \(total) signed in\(resets)",
+                              "Şef + \(snapshot.workers.count) Claude worker · \(total) oturum açık\(resets)")
             } else {
-                text = L.text("\(snapshot.workers.count) Claude workers · \(signedIn) signed in",
-                              "\(snapshot.workers.count) Claude worker · \(signedIn) oturum açık")
+                text = L.text("\(snapshot.workers.count) Claude workers · \(signedIn) signed in\(resets)",
+                              "\(snapshot.workers.count) Claude worker · \(signedIn) oturum açık\(resets)")
             }
         } else if claudexInFlight {
             text = L.text("Reading GrandeClaudex…", "GrandeClaudex okunuyor…")
@@ -5645,11 +5693,12 @@ extension QuotaViewController {
             note = L.text("\(alias) · not read yet", "\(alias) · henüz okunmadı")
         }
         let plan = worker.planTitle ?? "Claudex"
+        let resets = worker.loggedIn ? worker.limitResets(now: now) : nil
         return QuotaCard(
             name: worker.email ?? alias, plan: plan,
             sessionPercent: session?.remainingPercent, sessionResetSeconds: session?.resetSeconds,
             weeklyPercent: weekly?.remainingPercent, weeklyResetSeconds: weekly?.resetSeconds,
-            resetCreditsAvailableCount: nil, resetCreditExpiries: [],
+            resetCreditsAvailableCount: resets?.count, resetCreditExpiries: resets?.expiries ?? [],
             allowed: nil, limitReached: nil, updatedAt: now,
             weeklyLabel: worker.weeklyModel,
             modelWeeklyLabel: modelWeekly == nil ? nil : worker.sevenDayModelLabel,
