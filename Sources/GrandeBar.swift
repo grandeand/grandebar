@@ -37,6 +37,8 @@ private enum AppConfig {
     static let languageKey = "languageMode"
     static let languageOptions = ["auto", "en", "tr"]
     static let costViewKey = "costView"
+    /// "Don't show again" on the Remote Control note after the chief moved.
+    static let chiefMoveNoteHiddenKey = "chiefMoveRemoteControlNoteHidden"
 
     static func mode() -> AppMode {
         AppMode(rawValue: UserDefaults.standard.string(forKey: modeKey) ?? "") ?? .codex
@@ -321,6 +323,13 @@ private extension CostView {
     }
 }
 
+/// A button on an account card, e.g. the Claudex chief card's "Move the Chief".
+private struct CardAction {
+    let title: String
+    let toolTip: String
+    let handler: (NSView) -> Void
+}
+
 private struct QuotaCard {
     let name: String
     let plan: String
@@ -355,6 +364,12 @@ private struct QuotaCard {
     /// The account's name in the weekly pace summary (the Claudex alias); nil uses the part of the
     /// address before the @.
     var shortName: String? = nil
+    /// The Claudex chief card: a line under the rows naming the account Claude Desktop runs the
+    /// chief on (gdc's chief seat), with its tooltip.
+    var seatLine: String? = nil
+    var seatToolTip: String? = nil
+    /// A button at the end of the seat line (the chief card's "Move the Chief").
+    var action: CardAction? = nil
 
     var isLocked: Bool {
         if allowed == false { return true }
@@ -619,6 +634,11 @@ final class QuotaViewController: NSViewController {
     private var claudexInstalled = GrandeClaudexCLI.locate() != nil
     /// GrandeClaudex's Claude workers, read through gdc; outside the pool totals and the menu bar.
     private var claudex: GrandeClaudexSnapshot?
+    /// The account Claude Desktop runs the chief on (`gdc chief-seat`), read with the workers; nil
+    /// while unknown or with a gdc that has no chief seat.
+    private var claudexSeat: GrandeClaudexSeat?
+    /// A chief move is reading gdc before its confirmation.
+    private var chiefMoveInFlight = false
     private var claudexProblem: String?
     private var claudexInFlight = false
     private var claudexProbing = false
@@ -2076,7 +2096,10 @@ private final class AccountCardView: NSView {
         footer.toolTip = card.note
         footer.translatesAutoresizingMaskIntoConstraints = false
 
-        ([name, chip, footer] + rows).forEach(addSubview)
+        // The chief card's seat line and its button sit between the rows and the footer.
+        let seat = (card.seatLine != nil || card.action != nil) ? Self.seatRow(card) : nil
+
+        ([name, chip, footer] + rows + [seat].compactMap { $0 }).forEach(addSubview)
 
         var constraints = [
             name.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
@@ -2088,9 +2111,16 @@ private final class AccountCardView: NSView {
 
             footer.leadingAnchor.constraint(equalTo: session.leadingAnchor),
             footer.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
-            footer.topAnchor.constraint(equalTo: rows[rows.count - 1].bottomAnchor, constant: 6),
+            footer.topAnchor.constraint(equalTo: (seat ?? rows[rows.count - 1]).bottomAnchor, constant: 6),
             footer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -11)
         ]
+        if let seat {
+            constraints += [
+                seat.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+                seat.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+                seat.topAnchor.constraint(equalTo: rows[rows.count - 1].bottomAnchor, constant: 6)
+            ]
+        }
         for (index, row) in rows.enumerated() {
             constraints += [
                 row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
@@ -2109,6 +2139,39 @@ private final class AccountCardView: NSView {
 
     private func compactName(_ value: String) -> String {
         value.replacingOccurrences(of: "-team", with: "")
+    }
+
+    /// "Seat: Trossard · grande1@…" and, at its end, the card's button.
+    private static func seatRow(_ card: QuotaCard) -> NSView {
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+        let label = NSTextField(labelWithString: card.seatLine ?? "")
+        label.font = .systemFont(ofSize: 10.5, weight: .regular)
+        label.textColor = Theme.secondaryText
+        label.lineBreakMode = .byTruncatingMiddle
+        label.toolTip = card.seatToolTip
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(label)
+        var constraints = [
+            row.heightAnchor.constraint(equalToConstant: 22),
+            label.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            label.centerYAnchor.constraint(equalTo: row.centerYAnchor)
+        ]
+        if let action = card.action {
+            let button = RouteChipView(text: action.title, style: .option, action: action.handler)
+            button.toolTip = action.toolTip
+            row.addSubview(button)
+            constraints += [
+                button.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+                button.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+                label.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -8)
+            ]
+        } else {
+            constraints.append(label.trailingAnchor.constraint(lessThanOrEqualTo: row.trailingAnchor))
+        }
+        NSLayoutConstraint.activate(constraints)
+        return row
     }
 
     private func chipText(_ card: QuotaCard) -> String {
@@ -5402,9 +5465,11 @@ extension QuotaViewController {
         updateClaudexStatus()
         DispatchQueue.global(qos: .utility).async {
             let result = GrandeClaudexCLI.fetch(probe: probe)
+            let seat = Self.readChiefSeat(after: result)
             DispatchQueue.main.async {
                 self.claudexInFlight = false
                 self.claudexProbing = false
+                if case .success = result { self.claudexSeat = seat }
                 self.applyClaudex(result)
                 if self.claudexProbeQueued {
                     self.claudexProbeQueued = false
@@ -5418,6 +5483,26 @@ extension QuotaViewController {
         refreshClaudex(probeNow: true)
     }
 
+    /// The chief seat, once the workers were read; an older gdc without `chief-seat` gives nil.
+    private static func readChiefSeat(after usage: Result<GrandeClaudexSnapshot, GrandeClaudexCLI.Failure>) -> GrandeClaudexSeat? {
+        guard case .success = usage else { return nil }
+        return try? GrandeClaudexCLI.chiefSeat().get()
+    }
+
+    /// What went wrong with gdc, for the status line and the chief move's dialogs.
+    private static func describe(_ failure: GrandeClaudexCLI.Failure) -> String {
+        switch failure {
+        case .notInstalled:
+            return L.text("GrandeClaudex's gdc was not found (~/.local/bin/gdc or PATH)", "GrandeClaudex'in gdc'si bulunamadı (~/.local/bin/gdc ya da PATH)")
+        case .timedOut:
+            return L.text("gdc did not answer in time", "gdc zamanında yanıt vermedi")
+        case .unreadable:
+            return L.text("gdc's reply could not be read", "gdc'nin yanıtı okunamadı")
+        case .failed(let message):
+            return L.text("gdc failed: \(message)", "gdc hata verdi: \(message)")
+        }
+    }
+
     private func applyClaudex(_ result: Result<GrandeClaudexSnapshot, GrandeClaudexCLI.Failure>) {
         switch result {
         case .success(let snapshot):
@@ -5427,15 +5512,12 @@ extension QuotaViewController {
             // gdc went away since the last check, so the Claudex tab does too.
             claudexInstalled = false
             claudex = nil
+            claudexSeat = nil
             claudexProblem = nil
             if AppConfig.mode() == .claude { rebuildClaudeTabContent(withTabs: true) }
             return
-        case .failure(.timedOut):
-            claudexProblem = L.text("gdc did not answer in time", "gdc zamanında yanıt vermedi")
-        case .failure(.unreadable):
-            claudexProblem = L.text("gdc's reply could not be read", "gdc'nin yanıtı okunamadı")
-        case .failure(.failed(let message)):
-            claudexProblem = L.text("gdc failed: \(message)", "gdc hata verdi: \(message)")
+        case .failure(let failure):
+            claudexProblem = Self.describe(failure)
         }
         guard AppConfig.mode() == .claude, claudeTab == .claudex else { return }
         rebuildClaudeTabContent()
@@ -5477,7 +5559,7 @@ extension QuotaViewController {
         }
         // The chief (this Mac's own Claude Code login) comes first, then the workers in gdc's order.
         let now = Date()
-        let chief = snapshot.chiefUsage.map { [claudexCard($0, now: now, isChief: true)] } ?? []
+        let chief = snapshot.chiefUsage.map { [claudexChiefCard($0, now: now)] } ?? []
         let cards = chief + snapshot.workers.map { claudexCard($0, now: now) }
         return [header] + paceSummary(cards) + [AccountsGroupView(cards: cards)]
     }
@@ -5516,6 +5598,32 @@ extension QuotaViewController {
         label.stringValue = text
         label.toolTip = text
         label.textColor = failed ? NSColor.systemRed : Theme.secondaryText
+    }
+
+    /// The chief's card with the seat line (the account Claude Desktop runs the chief on) and the
+    /// "Move the Chief" button.
+    private func claudexChiefCard(_ chief: GrandeClaudexWorker, now: Date) -> QuotaCard {
+        var card = claudexCard(chief, now: now, isChief: true)
+        if let seat = claudexSeat {
+            let who = [seat.name, seat.email].compactMap { $0 }.joined(separator: " · ")
+            card.seatLine = L.text("Seat: \(who)", "Koltuk: \(who)")
+            var tip = L.text("The account Claude Desktop runs the chief on (gdc chief-seat); GrandeClaudex sends no worker to it.",
+                             "Claude Desktop'un şefi çalıştırdığı hesap (gdc chief-seat); GrandeClaudex ona worker göndermez.")
+            if let since = seat.since {
+                let formatter = DateFormatter()
+                formatter.locale = Locale(identifier: L.isTurkish ? "tr_TR" : "en_US_POSIX")
+                formatter.dateFormat = L.isTurkish ? "d MMM HH:mm" : "MMM d HH:mm"
+                tip += "\n" + L.text("Since \(formatter.string(from: since))", "\(formatter.string(from: since)) tarihinden beri")
+            }
+            card.seatToolTip = tip
+        }
+        card.action = CardAction(
+            title: L.text("Move the Chief", "Şefi taşı"),
+            toolTip: L.text("Switch Claude Desktop to the worker account with the most room and record it as the chief seat",
+                            "Claude Desktop'u en çok yeri olan worker hesabına geçir ve şef koltuğu olarak kaydet"),
+            handler: { [weak self] _ in self?.moveChief(to: nil) }
+        )
+        return card
     }
 
     /// A worker as a Desktop account card: email, "<plan> · <alias>" chip, the 5h row and the
@@ -5738,16 +5846,20 @@ extension QuotaViewController {
                     details.append(limits)
                 }
                 if !details.isEmpty {
-                    let title = NSMutableAttributedString(string: account.alias, attributes: [.font: NSFont.menuFont(ofSize: 0)])
-                    title.append(NSAttributedString(string: "  " + details.joined(separator: " · "), attributes: [
-                        .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
-                        .foregroundColor: NSColor.secondaryLabelColor
-                    ]))
-                    item.attributedTitle = title
+                    item.attributedTitle = Self.accountMenuTitle(account.alias, details: details)
                 }
                 menu.addItem(item)
             }
             if !accounts.isEmpty || onProxy { menu.addItem(.separator()) }
+            // Moving the GrandeClaudex chief to another saved login needs gdc.
+            if claudexInstalled, !accounts.isEmpty {
+                let move = menuItem(L.text("Move the Chief…", "Şefi taşı…"), #selector(moveChiefClicked))
+                move.toolTip = L.text("Switch Claude Desktop to the GrandeClaudex worker account with the most room and record it as the chief seat",
+                                      "Claude Desktop'u en çok yeri olan GrandeClaudex worker hesabına geçir ve şef koltuğu olarak kaydet")
+                menu.addItem(move)
+                menu.addItem(chiefTargetsMenuItem())
+                menu.addItem(.separator())
+            }
             // Signing in needs Desktop on claude.ai.
             if !onProxy {
                 if active == nil, store.liveIsSignedIn() {
@@ -5782,6 +5894,16 @@ extension QuotaViewController {
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.isFlipped ? anchor.bounds.height + 4 : -4), in: anchor)
     }
 
+    /// The alias, then its details in small grey type, as the account menu lists a login.
+    private static func accountMenuTitle(_ alias: String, details: [String]) -> NSAttributedString {
+        let title = NSMutableAttributedString(string: alias, attributes: [.font: NSFont.menuFont(ofSize: 0)])
+        title.append(NSAttributedString(string: "  " + details.joined(separator: " · "), attributes: [
+            .font: NSFont.menuFont(ofSize: NSFont.smallSystemFontSize),
+            .foregroundColor: NSColor.secondaryLabelColor
+        ]))
+        return title
+    }
+
     private func menuItem(_ title: String, _ action: Selector, represented: Any? = nil) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
@@ -5804,18 +5926,27 @@ extension QuotaViewController {
             ? L.text("Switch Claude Desktop to claude.ai as \(alias)", "Claude Desktop'u claude.ai'de \(alias) hesabına geçir")
             : L.text("Switch Claude Desktop to \(alias)", "Claude Desktop'u \(alias) hesabına geçir")
         guard confirm(title, info, button: L.text("Switch", "Geçiş yap"), restartsDesktop: true) else { return }
+        switchDesktopAccount(to: alias, leavingProxy: onProxy)
+    }
 
+    /// Quits Desktop, saves the outgoing login, restores `alias` (leaving CLIProxy first when
+    /// `leavingProxy`), syncs shared Code sessions while Desktop is closed and relaunches it.
+    /// `completion` runs on the main thread once a failure, if any, was shown.
+    private func switchDesktopAccount(to alias: String, leavingProxy: Bool, completion: ((Error?) -> Void)? = nil) {
         DispatchQueue.global(qos: .userInitiated).async {
             var failure: Error?
             do {
                 try ClaudeProviderSwitcher.desktopAccounts.switchTo(alias) {
-                    if onProxy { try ClaudeProviderSwitcher.applyDesktop(proxy: false, apiKey: nil) }
+                    if leavingProxy { try ClaudeProviderSwitcher.applyDesktop(proxy: false, apiKey: nil) }
                     ClaudeProviderSwitcher.syncSessionsIfShared()
                 }
             } catch {
                 failure = error
             }
-            DispatchQueue.main.async { self.finishProviderAction(failure) }
+            DispatchQueue.main.async {
+                self.finishProviderAction(failure)
+                completion?(failure)
+            }
         }
     }
 
@@ -5945,6 +6076,245 @@ extension QuotaViewController {
                     }
                 }
             }
+        }
+    }
+
+    // MARK: Moving the GrandeClaudex chief
+
+    @objc private func moveChiefClicked() {
+        moveChief(to: nil)
+    }
+
+    @objc private func moveChiefToChosen(_ sender: NSMenuItem) {
+        guard let alias = sender.representedObject as? String else { return }
+        moveChief(to: alias)
+    }
+
+    /// The ranking over the saved Desktop logins, without the one Desktop is on now (none while
+    /// it runs through CLIProxy). The current account's domain comes from Desktop's login, else
+    /// from the chief seat.
+    private func chiefMovePlan(_ snapshot: GrandeClaudexSnapshot) -> ChiefMove.Plan {
+        let store = ClaudeProviderSwitcher.desktopAccounts
+        let live = store.liveIsSignedIn() ? store.liveAccountUUID() : nil
+        let onProxy = ClaudeProviderSwitcher.desktopMode() != .official
+        return ChiefMove.plan(
+            accounts: store.accounts().map { ChiefMove.SavedAccount(alias: $0.alias, accountUUID: $0.accountUUID, email: $0.email) },
+            currentAccountUUID: onProxy ? nil : live,
+            currentEmail: live.flatMap(store.email(for:)) ?? claudexSeat?.email ?? snapshot.chief,
+            snapshot: snapshot
+        )
+    }
+
+    /// "Move the Chief To": every saved login with room and its numbers, from the last gdc read,
+    /// then those without room, greyed out with the reason.
+    private func chiefTargetsMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: L.text("Move the Chief To", "Şefi şuraya taşı"), action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        func note(_ text: String) {
+            let line = NSMenuItem(title: text, action: nil, keyEquivalent: "")
+            line.isEnabled = false
+            submenu.addItem(line)
+        }
+        guard let snapshot = claudex else {
+            note(L.text("Reading GrandeClaudex…", "GrandeClaudex okunuyor…"))
+            refreshClaudex()
+            item.submenu = submenu
+            return item
+        }
+        let plan = chiefMovePlan(snapshot)
+        let turkish = L.isTurkish
+        for option in plan.candidates {
+            guard let alias = option.account?.alias else { continue }
+            let entry = menuItem(alias, #selector(moveChiefToChosen(_:)), represented: alias)
+            let details = (option.email != alias ? [option.email] : []) + [ChiefMove.numbers(option, turkish: turkish)]
+            entry.attributedTitle = Self.accountMenuTitle(alias, details: details)
+            entry.toolTip = ChiefMove.line(option, turkish: turkish)
+            submenu.addItem(entry)
+        }
+        if plan.candidates.isEmpty {
+            note(L.text("No saved account has room", "Kayıtlı hiçbir hesapta yer yok"))
+        }
+        if !plan.skipped.isEmpty {
+            submenu.addItem(.separator())
+            note(L.text("No room now:", "Şu an yeri olmayanlar:"))
+            for option in plan.skipped {
+                let entry = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+                entry.attributedTitle = Self.accountMenuTitle(option.account?.alias ?? option.email, details: [ChiefMove.skipText(option, turkish: turkish)])
+                entry.isEnabled = false
+                submenu.addItem(entry)
+            }
+        }
+        item.submenu = submenu
+        return item
+    }
+
+    /// Reads gdc's cache again (no probe), then asks before switching Desktop to `alias`, or to the
+    /// best account when it is nil.
+    private func moveChief(to alias: String?) {
+        guard DesktopLoginState.pendingAlias == nil, !chiefMoveInFlight else { return }
+        chiefMoveInFlight = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = GrandeClaudexCLI.fetch(probe: false)
+            let seat = Self.readChiefSeat(after: result)
+            DispatchQueue.main.async {
+                self.chiefMoveInFlight = false
+                switch result {
+                case .success(let snapshot):
+                    self.claudexSeat = seat
+                    self.applyClaudex(result)
+                    self.confirmChiefMove(snapshot, chosen: alias)
+                case .failure(let failure):
+                    self.notify(L.text("Cannot move the chief", "Şef taşınamıyor"), Self.describe(failure))
+                }
+            }
+        }
+    }
+
+    /// The confirmation names the pick and the runner-up (or the chosen account and the best one)
+    /// with their numbers. Confirming turns shared Code sessions on when they are off, so the
+    /// chief's conversation follows, and runs the usual account switch.
+    private func confirmChiefMove(_ snapshot: GrandeClaudexSnapshot, chosen: String?) {
+        let plan = chiefMovePlan(snapshot)
+        let turkish = L.isTurkish
+        var lines: [String] = []
+        let target: ChiefMove.Option
+        if let chosen {
+            guard let option = (plan.candidates + plan.skipped).first(where: { $0.account?.alias == chosen }) else {
+                notify(L.text("Cannot move the chief", "Şef taşınamıyor"),
+                       L.text("\(chosen) is not a GrandeClaudex Claude worker's account, or Claude Desktop is on it already.",
+                              "\(chosen) bir GrandeClaudex Claude worker hesabı değil ya da Claude Desktop zaten bu hesapta."))
+                return
+            }
+            target = option
+            lines.append(L.text("Chosen: ", "Seçilen: ") + ChiefMove.line(option, turkish: turkish))
+            if option.skip != nil {
+                lines.append("⚠️ " + L.text("No room now: ", "Şu an yer yok: ") + ChiefMove.skipText(option, turkish: turkish))
+            }
+            if let best = plan.pick, best.account?.alias != chosen {
+                lines.append(L.text("Best pick: ", "En uygun: ") + ChiefMove.line(best, turkish: turkish))
+            }
+        } else {
+            guard let pick = plan.pick else {
+                showNoChiefTarget(plan)
+                return
+            }
+            target = pick
+            lines.append(L.text("Pick: ", "Seçilen: ") + ChiefMove.line(pick, turkish: turkish))
+            lines.append(L.text("Runner-up: ", "Yedek: ") + (plan.runnerUp.map { ChiefMove.line($0, turkish: turkish) } ?? L.text("none", "yok")))
+        }
+        guard let alias = target.account?.alias else { return }
+        let email = target.email
+        let onProxy = ClaudeProviderSwitcher.desktopMode() != .official
+        lines.append("")
+        if onProxy {
+            lines.append(L.text("Claude Desktop leaves CLIProxy and comes back on claude.ai as \(alias).",
+                                "Claude Desktop CLIProxy'den çıkar ve claude.ai'ye \(alias) olarak döner."))
+        }
+        lines.append(L.text(
+            "Claude Desktop switches to \(alias) and the chief's Code session goes on there. GrandeClaudex then records \(email) as the chief seat and sends no worker to it.",
+            "Claude Desktop \(alias) hesabına geçer, şefin Code oturumu orada sürer. Ardından GrandeClaudex \(email) hesabını şef koltuğu olarak kaydeder ve ona worker göndermez."
+        ))
+        let sharingOff = !ClaudeSessionSharing.isEnabled
+        if sharingOff {
+            lines.append("")
+            lines.append(L.text(
+                "Shared Code sessions are off: they are turned on first, so the chief's conversation follows to \(alias). Every Desktop account then lists the same Code sessions.",
+                "Ortak Code oturumları kapalı: şefin sohbeti \(alias) hesabına geçebilsin diye önce açılır. Bundan sonra tüm Desktop hesapları aynı Code oturumlarını listeler."
+            ))
+        }
+        let button = sharingOff ? L.text("Share Sessions and Move", "Oturumları paylaş ve taşı") : L.text("Move the Chief", "Şefi taşı")
+        guard confirm(L.text("Move the chief to \(email)?", "Şef \(email) hesabına taşınsın mı?"),
+                      lines.joined(separator: "\n"), button: button, restartsDesktop: true) else { return }
+        // The switch syncs the sessions while Desktop is closed, so the chief's session is in the
+        // new account's list when Desktop opens.
+        if sharingOff { ClaudeSessionSharing.isEnabled = true }
+        switchDesktopAccount(to: alias, leavingProxy: onProxy) { failure in
+            guard failure == nil else { return }
+            self.recordChiefSeat(email)
+        }
+    }
+
+    /// No saved login has room: why each saved worker account was skipped, and which worker
+    /// accounts with room to add with "Add Account…" first.
+    private func showNoChiefTarget(_ plan: ChiefMove.Plan) {
+        let turkish = L.isTurkish
+        var lines: [String] = []
+        if plan.skipped.isEmpty {
+            lines.append(L.text("No other saved Claude Desktop login is a GrandeClaudex Claude worker's account.",
+                                "Kayıtlı başka hiçbir Claude Desktop oturumu bir GrandeClaudex Claude worker hesabı değil."))
+        } else {
+            lines.append(L.text("No room now (5h at \(ChiefMove.fiveHourLimit)% or more, or a week used ahead of its pace):",
+                                "Şu an yer yok (5 saat %\(ChiefMove.fiveHourLimit) ya da üstü, ya da haftası tempodan önde):"))
+            lines += plan.skipped.map { "• \($0.account?.alias ?? $0.email): " + ChiefMove.skipText($0, turkish: turkish) }
+        }
+        lines.append("")
+        if plan.missing.isEmpty {
+            lines.append(L.text("No other GrandeClaudex Claude worker account has room now either.",
+                                "Yeri olan başka bir GrandeClaudex Claude worker hesabı da yok."))
+        } else {
+            lines.append(L.text("These worker accounts have room; add them with Add Account… first:",
+                                "Şu worker hesaplarında yer var; önce Hesap ekle… ile ekle:"))
+            lines += plan.missing.map { "• " + ChiefMove.line($0, turkish: turkish) }
+        }
+        let alert = NSAlert()
+        alert.messageText = L.text("No account to move the chief to", "Şefi taşıyacak hesap yok")
+        alert.informativeText = lines.joined(separator: "\n")
+        if !plan.missing.isEmpty, ClaudeProviderSwitcher.desktopMode() == .official {
+            alert.addButton(withTitle: L.text("Add Account…", "Hesap ekle…"))
+        }
+        alert.addButton(withTitle: L.text("OK", "Tamam"))
+        alert.window.appearance = Theme.appAppearance
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn, alert.buttons.count == 2 {
+            addDesktopAccount()
+        }
+    }
+
+    /// Tells GrandeClaudex where the chief runs now, then shows the Remote Control note; a missing
+    /// or failing gdc only adds a line to that note.
+    private func recordChiefSeat(_ email: String) {
+        DispatchQueue.global(qos: .utility).async {
+            let result = GrandeClaudexCLI.setChiefSeat(email)
+            DispatchQueue.main.async {
+                var problem: String?
+                switch result {
+                case .success(let seat):
+                    self.claudexSeat = seat
+                case .failure(let failure):
+                    problem = Self.describe(failure) + L.text(
+                        ". GrandeClaudex does not know the chief moved yet; its next prompt records it, or run: gdc chief-seat --set \(email)",
+                        ". GrandeClaudex şefin taşındığını henüz bilmiyor; şefin bir sonraki mesajı kaydeder ya da şunu çalıştır: gdc chief-seat --set \(email)"
+                    )
+                }
+                self.refreshClaudex()
+                self.showChiefMovedNote(email: email, problem: problem)
+            }
+        }
+    }
+
+    /// One line after the relaunch: Remote Control did not survive the restart. "Don't show
+    /// again" hides it for good; a gdc problem is still shown.
+    private func showChiefMovedNote(email: String, problem: String?) {
+        let hidden = UserDefaults.standard.bool(forKey: AppConfig.chiefMoveNoteHiddenKey)
+        guard !hidden || problem != nil else { return }
+        let alert = NSAlert()
+        if hidden {
+            alert.messageText = L.text("The chief moved to \(email)", "Şef \(email) hesabına taşındı")
+        } else {
+            alert.messageText = L.text(
+                "The restart dropped Remote Control: turn it on again in the chief's session (on the phone, use \(email)).",
+                "Yeniden başlatma Remote Control'ü kapattı: şefin oturumunda yeniden aç (telefonda da \(email) hesabını kullan)."
+            )
+            alert.showsSuppressionButton = true
+            alert.suppressionButton?.title = L.text("Don't show again", "Bir daha gösterme")
+        }
+        alert.informativeText = problem.map { "⚠️ " + $0 } ?? ""
+        alert.window.appearance = Theme.appAppearance
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+        if alert.suppressionButton?.state == .on {
+            UserDefaults.standard.set(true, forKey: AppConfig.chiefMoveNoteHiddenKey)
         }
     }
 
