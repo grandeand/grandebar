@@ -5856,8 +5856,9 @@ extension QuotaViewController {
                 menu.addItem(item)
             }
             if !accounts.isEmpty || onProxy { menu.addItem(.separator()) }
-            // Moving the GrandeClaudex chief to another saved login needs gdc.
-            if claudexInstalled, !accounts.isEmpty {
+            // Moving the GrandeClaudex chief to another saved login needs gdc, on the chief's Mac
+            // (gdc reports the chief's own limits only there).
+            if claudexInstalled, !accounts.isEmpty, claudex.map({ $0.chiefUsage != nil }) ?? true {
                 let move = menuItem(L.text("Move the Chief…", "Şefi taşı…"), #selector(moveChiefClicked))
                 move.toolTip = L.text("Switch Claude Desktop to the GrandeClaudex worker account with the most room and record it as the chief seat",
                                       "Claude Desktop'u en çok yeri olan GrandeClaudex worker hesabına geçir ve şef koltuğu olarak kaydet")
@@ -6168,6 +6169,12 @@ extension QuotaViewController {
                 case .success(let snapshot):
                     self.claudexSeat = seat
                     self.applyClaudex(result)
+                    guard snapshot.chiefUsage != nil else {
+                        self.notify(L.text("Cannot move the chief", "Şef taşınamıyor"),
+                                    L.text("GrandeClaudex runs its chief on another Mac; move it from GrandeBar there.",
+                                           "GrandeClaudex şefini başka bir Mac'te çalıştırıyor; şefi oradaki GrandeBar'dan taşı."))
+                        return
+                    }
                     self.confirmChiefMove(snapshot, chosen: alias)
                 case .failure(let failure):
                     self.notify(L.text("Cannot move the chief", "Şef taşınamıyor"), Self.describe(failure))
@@ -6188,6 +6195,8 @@ extension QuotaViewController {
     /// with their numbers. Confirming turns shared Code sessions on when they are off, so the
     /// chief's conversation follows, and runs the usual account switch.
     private func confirmChiefMove(_ snapshot: GrandeClaudexSnapshot, chosen: String?) {
+        // Logins are matched to workers by email, as the account menu fills them in.
+        ClaudeProviderSwitcher.desktopAccounts.backfillEmails()
         let plan = chiefMovePlan(snapshot)
         let onProxy = ClaudeProviderSwitcher.desktopMode() != .official
         let sharingOff = !ClaudeSessionSharing.isEnabled
