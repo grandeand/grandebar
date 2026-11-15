@@ -117,6 +117,29 @@ GrandeBar asks the management API for active auth files, then uses the managemen
 
 No management key is stored in the app bundle. The key is saved in macOS user defaults for the current user.
 
+## quota.json
+
+After every successful refresh GrandeBar also writes what the menu bar shows to `~/.config/grandebar/quota.json` (the folder is created when missing), so other tools can read the official percentages without asking the usage API themselves. The file is replaced atomically (a temporary file renamed over it). A failed refresh, a stale (cached) read or a failed write leaves the previous file as it is; a write error never reaches the app.
+
+```json
+{
+  "mode": "claude",
+  "scope": "account",
+  "plan": "Max 5x",
+  "account": "Desktop",
+  "five_hour": { "utilization": 40, "resets_at": "2026-11-13T21:00:00Z" },
+  "seven_day": { "utilization": 14, "resets_at": "2026-11-16T20:00:00Z" },
+  "seven_day_fable": { "utilization": 11, "resets_at": "2026-11-16T20:00:00Z" },
+  "updated_at": "2026-11-13T20:00:00Z",
+  "source": "grandebar 0.2.37"
+}
+```
+
+- `mode` is the current mode, `codex` or `claude`. `scope` is `account` when the menu bar shows one claude.ai account (Claude mode, Desktop or Code signed in) and `pool` for the CLIProxy pool total.
+- `utilization` is the share used, 0–100 (100 minus the remaining percentage on the cards); `resets_at` is ISO 8601 UTC or `null`. A missing window is `null`. Model-scoped weekly limits appear as `seven_day_<model>` (`seven_day_fable`, `seven_day_opus`) when the account has one.
+- A `pool` file adds `session_pool_percent` (the remaining 5h pool, the menu bar's first line) and `account_count`; its windows are pool averages and `resets_at` is the nearest upcoming reset among the accounts.
+- `updated_at` is when the values were read from the usage API. `account` is a label (`Desktop`, `Desktop · <saved name>`, `Code`, `CLIProxy pool`); email addresses, tokens and keys are never written.
+
 ## Security Notes
 
 - Do not expose your CLIProxyAPI management endpoint publicly without proper protection.
