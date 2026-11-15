@@ -1711,6 +1711,84 @@ final class QuotaViewController: NSViewController {
                 ? [L.text("Pool total (CLIProxy)", "Havuz toplamı (CLIProxy)")] : []
             statusUpdate(menuBarPoolTitle(summary), (header + lines).joined(separator: "\n"))
         }
+        writeQuotaFile(cards: cards, summary: summary)
+    }
+
+    /// Mirrors what the menu bar shows into `~/.config/grandebar/quota.json` for other tools.
+    /// Only fresh reads are written: a failed refresh or a stale (cached) card leaves the previous
+    /// file as it was. Account names are not written when they are email addresses.
+    private func writeQuotaFile(cards: [QuotaCard], summary: TotalLimitSummary) {
+        let mode = AppConfig.mode()
+        func resetDate(_ card: QuotaCard, _ seconds: Int?) -> Date? {
+            seconds.map { card.updatedAt.addingTimeInterval(TimeInterval($0)) }
+        }
+
+        if mode == .claude, let active = activeClaudeCard(in: cards) {
+            let card = active.card
+            guard !card.stale else { return }
+            let alias = active.client == "Desktop" ? QuotaFile.safeLabel(ClaudeProviderSwitcher.desktopAccounts.activeAlias()) : nil
+            var snapshot = QuotaFileSnapshot(
+                mode: mode.rawValue, scope: "account", plan: card.plan,
+                account: alias.map { "\(active.client) · \($0)" } ?? active.client,
+                updatedAt: card.updatedAt, version: QuotaFile.appVersion
+            )
+            snapshot.fiveHour = QuotaFileWindow(remaining: card.sessionPercent, resetsAt: resetDate(card, card.sessionResetSeconds))
+            let weekly = QuotaFileWindow(remaining: card.weeklyPercent, resetsAt: resetDate(card, card.weeklyResetSeconds))
+            if let label = card.weeklyLabel {
+                snapshot.modelWeekly[label] = weekly
+            } else {
+                snapshot.sevenDay = weekly
+            }
+            if let label = card.modelWeeklyLabel {
+                snapshot.modelWeekly[label] = QuotaFileWindow(remaining: card.modelWeeklyPercent, resetsAt: resetDate(card, card.modelWeeklyResetSeconds))
+            }
+            QuotaFile.save(snapshot)
+            return
+        }
+
+        // Pool total, as on the menu bar; not while CLIProxy's last refresh failed.
+        guard mode == .codex || cliproxyProblem == nil else { return }
+        let reporting = cards.filter { $0.sessionPercent != nil || $0.weeklyPercent != nil }
+        guard let updatedAt = reporting.filter({ !$0.stale }).map(\.updatedAt).max() else { return }
+
+        func pool(_ values: [Int]) -> Int? {
+            values.isEmpty ? nil : Int((Double(values.reduce(0, +)) / Double(values.count)).rounded())
+        }
+        func nearest(_ dates: [Date?]) -> Date? {
+            dates.compactMap { $0 }.filter { $0 > Date() }.min()
+        }
+        let plans = Set(reporting.map(\.plan))
+        var snapshot = QuotaFileSnapshot(
+            mode: mode.rawValue, scope: "pool", plan: plans.count == 1 ? plans.first : nil,
+            account: "CLIProxy pool", accountCount: reporting.count,
+            updatedAt: updatedAt, version: QuotaFile.appVersion
+        )
+        // The session pool exactly as the menu bar's first line computes it.
+        let sessionPool = summary.sessionTotal.flatMap { total -> Int? in
+            guard total > 0, let remaining = summary.sessionRemaining else { return nil }
+            return Int((Double(remaining) / Double(total) * 100).rounded())
+        }
+        let sessionCards = reporting.filter { $0.sessionPercent != nil }
+        snapshot.sessionPoolPercent = sessionPool
+        snapshot.fiveHour = QuotaFileWindow(remaining: sessionPool, resetsAt: nearest(sessionCards.map { resetDate($0, $0.sessionResetSeconds) }))
+        let generalCards = reporting.filter { $0.weeklyLabel == nil && $0.weeklyPercent != nil }
+        snapshot.sevenDay = QuotaFileWindow(
+            remaining: pool(generalCards.compactMap(\.weeklyPercent)),
+            resetsAt: nearest(generalCards.map { resetDate($0, $0.weeklyResetSeconds) })
+        )
+        var models: [String: [(percent: Int, reset: Date?)]] = [:]
+        for card in reporting {
+            if let label = card.weeklyLabel, let percent = card.weeklyPercent {
+                models[label, default: []].append((percent, resetDate(card, card.weeklyResetSeconds)))
+            }
+            if let label = card.modelWeeklyLabel, let percent = card.modelWeeklyPercent {
+                models[label, default: []].append((percent, resetDate(card, card.modelWeeklyResetSeconds)))
+            }
+        }
+        for (label, rows) in models {
+            snapshot.modelWeekly[label] = QuotaFileWindow(remaining: pool(rows.map(\.percent)), resetsAt: nearest(rows.map(\.reset)))
+        }
+        QuotaFile.save(snapshot)
     }
 
     /// Nil (pool total) when the account is unknown or GrandeBar has no quota for it yet.

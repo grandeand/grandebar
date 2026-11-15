@@ -27,6 +27,7 @@ swiftc \
   "$ROOT/Sources/WeeklyPace.swift" \
   "$ROOT/Sources/LocalCosts.swift" \
   "$ROOT/Sources/GrandeBarUpdater.swift" \
+  "$ROOT/Sources/QuotaFile.swift" \
   "$ROOT/Sources/main.swift" \
   -framework AppKit \
   -framework ServiceManagement \
