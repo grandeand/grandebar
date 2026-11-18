@@ -646,6 +646,10 @@ final class QuotaViewController: NSViewController {
     /// The tab's button was pressed while a cache read ran; it probes once that read is back.
     private var claudexProbeQueued = false
     private var lastClaudexProbeAt: Date?
+    private var lastClaudexReadAt: Date?
+    /// The popover is open. GrandeClaudex is only read then: its numbers are shown nowhere else,
+    /// and a probe starts Claude Code once per worker.
+    private var isOnScreen = false
     private weak var claudexStatusLabel: NSTextField?
     private weak var claudexProbeButton: NSButton?
 
@@ -811,19 +815,21 @@ final class QuotaViewController: NSViewController {
 
     override func viewWillAppear() {
         super.viewWillAppear()
+        isOnScreen = true
         // The "last refresh" ticker only runs while the popover is on screen.
         updateLastRefreshLabel()
         startElapsedTimer()
         // gdc may have been installed or removed since the popover last opened.
         let installed = GrandeClaudexCLI.locate() != nil
-        guard installed != claudexInstalled else {
+        if installed != claudexInstalled {
+            claudexInstalled = installed
+            rebuildClaudeTabContent(withTabs: true)
+        } else {
             // Stored reads show "last read" times and reset countdowns relative to now.
             rebuildClaudeTabContent()
-            return
         }
-        claudexInstalled = installed
-        rebuildClaudeTabContent(withTabs: true)
-        if installed { refreshClaudex() }
+        // Background refreshes leave GrandeClaudex alone, so it is read when the popover opens.
+        if lastClaudexReadAt.map({ Date().timeIntervalSince($0) > 60 }) ?? true { refreshClaudex() }
     }
 
     private var claudeTab: ClaudeLimitsTab {
@@ -1306,6 +1312,7 @@ final class QuotaViewController: NSViewController {
 
     override func viewDidDisappear() {
         super.viewDidDisappear()
+        isOnScreen = false
         elapsedTimer?.invalidate()
         elapsedTimer = nil
     }
@@ -5596,20 +5603,26 @@ extension QuotaViewController {
         }
     }
 
-    /// The workers' limits come from `gdc usage --json`, always off the main thread. A refresh
-    /// probes them first (`--probe`: Claude Code's `/usage`, no model call) when the last probe is
-    /// at least `claudexProbeInterval` old and only reads gdc's cache otherwise; the tab's button
-    /// probes right away.
+    /// The workers' limits come from `gdc usage --json`, always off the main thread and only
+    /// while the popover is open. On the Claudex tab a refresh probes them first (`--probe`:
+    /// Claude Code's `/usage`, no model call) when the last probe is at least
+    /// `claudexProbeInterval` old; otherwise it only reads gdc's cache. The tab's button probes
+    /// right away.
     private func refreshClaudex(probeNow: Bool = false) {
         guard AppConfig.mode() == .claude, claudexInstalled else { return }
+        // With the popover closed nobody sees the result; opening it reads again.
+        guard probeNow || isOnScreen else { return }
         guard !claudexInFlight else {
             if probeNow, !claudexProbing { claudexProbeQueued = true }
             return
         }
-        // The auto-refresh timer drifts a few seconds off its beat; a probe due within that counts as due.
-        let probe = probeNow || lastClaudexProbeAt.map { Date().timeIntervalSince($0) > AppConfig.claudexProbeInterval - 5 } ?? true
+        // Only the Claudex tab probes on its own; the other tabs' chief menus take gdc's cache,
+        // which gdc keeps fresh itself.
+        let due = lastClaudexProbeAt.map { Date().timeIntervalSince($0) > AppConfig.claudexProbeInterval - 5 } ?? true
+        let probe = probeNow || (claudeTab == .claudex && due)
         claudexInFlight = true
         claudexProbing = probe
+        lastClaudexReadAt = Date()
         if probe { lastClaudexProbeAt = Date() }
         updateClaudexStatus()
         DispatchQueue.global(qos: .utility).async {
