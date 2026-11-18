@@ -15,7 +15,7 @@ cp "$ROOT/Resources/ccusage.json" "$APP/Contents/Resources/ccusage.json"
 cp "$ROOT/scripts/install-update.sh" "$APP/Contents/Resources/install-update.sh"
 chmod 0755 "$APP/Contents/Resources/install-update.sh"
 
-swiftc \
+swiftc -O \
   "$ROOT/Sources/GrandeBar.swift" \
   "$ROOT/Sources/ClaudeDesktopAccounts.swift" \
   "$ROOT/Sources/ClaudeSessionSharing.swift" \

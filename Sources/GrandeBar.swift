@@ -615,6 +615,7 @@ final class QuotaViewController: NSViewController {
     /// Bumped on mode switch so in-flight refreshes of the previous mode are dropped.
     private var refreshGeneration = 0
     private var wakeObserver: NSObjectProtocol?
+    private var desktopExitObserver: NSObjectProtocol?
     private var isRefreshing = false
     private var isWarming = false
     private var activeWarmup: SessionWarmupAPI?
@@ -653,6 +654,16 @@ final class QuotaViewController: NSViewController {
         super.init(nibName: nil, bundle: nil)
         updateAutoRefreshTimer()
         ClaudeProviderSwitcher.sessionSharing.startBackgroundSync()
+        // Desktop quitting changes no folder, but its account's folders can catch up once it is gone.
+        desktopExitObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didTerminateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { note in
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            guard app?.bundleIdentifier == ClaudeDesktopApp.bundleID else { return }
+            ClaudeProviderSwitcher.sessionSharing.syncSoon()
+        }
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
@@ -795,12 +806,14 @@ final class QuotaViewController: NSViewController {
         }
         renderIdle()
         renderCost()
-        startElapsedTimer()
         updateLastRefreshLabel()
     }
 
     override func viewWillAppear() {
         super.viewWillAppear()
+        // The "last refresh" ticker only runs while the popover is on screen.
+        updateLastRefreshLabel()
+        startElapsedTimer()
         // gdc may have been installed or removed since the popover last opened.
         let installed = GrandeClaudexCLI.locate() != nil
         guard installed != claudexInstalled else {
@@ -987,6 +1000,9 @@ final class QuotaViewController: NSViewController {
         elapsedTimer?.invalidate()
         autoRefreshTimer?.invalidate()
         automaticWarmupTimers.values.forEach { $0.invalidate() }
+        if let desktopExitObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(desktopExitObserver)
+        }
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
         }
@@ -1288,11 +1304,21 @@ final class QuotaViewController: NSViewController {
         resizeDocument()
     }
 
+    override func viewDidDisappear() {
+        super.viewDidDisappear()
+        elapsedTimer?.invalidate()
+        elapsedTimer = nil
+    }
+
     private func startElapsedTimer() {
         elapsedTimer?.invalidate()
-        elapsedTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             self?.updateLastRefreshLabel()
         }
+        timer.tolerance = 0.2
+        // .common keeps the label ticking while a menu or scroll is tracking inside the popover.
+        RunLoop.main.add(timer, forMode: .common)
+        elapsedTimer = timer
     }
 
     private func updateAutoRefreshTimer() {
