@@ -1,3 +1,4 @@
+import CoreServices
 import Foundation
 
 // Claude Desktop lists Code-tab sessions per account and org, from index files under
@@ -62,36 +63,148 @@ final class ClaudeSessionSharing {
     private static let tmpName = ".claude-session-sync-tmp"
     /// Files touched this recently may still be being written by the app.
     private static let settleNanoseconds: Int64 = 2_000_000_000
-    private static let interval: TimeInterval = 10
+
+    /// When background passes run. Nothing runs on a beat: a pass follows a change in the session
+    /// folders, and a slow safety pass covers a missed event or a folder that appeared since.
+    struct Pace {
+        /// From a change to its pass, so Desktop is done writing.
+        var debounce: TimeInterval = 10
+        /// Between passes while changes keep coming. Desktop saves the session it is working in
+        /// every few seconds, and the other accounts' folders are only read when Desktop starts or
+        /// changes account, so they do not have to follow every save.
+        var gap: TimeInterval = 60
+        var safety: TimeInterval = 300
+        /// From launch to the first pass.
+        var start: TimeInterval = 3
+    }
 
     private let home: URL
     /// Whether the Claude Desktop process is up; unknown counts as running.
     private let isDesktopRunning: () -> Bool
+    private let isEnabled: () -> Bool
+    private let pace: Pace
     private let fm = FileManager.default
     private let lock = NSLock()
-    private var timer: DispatchSourceTimer?
+    /// Background passes and everything that schedules them; the properties below are only
+    /// touched on it.
+    private let queue = DispatchQueue(label: "co.grande.grandebar.session-sharing", qos: .utility)
+    private var safetyTimer: DispatchSourceTimer?
+    private var stream: FSEventStreamRef?
+    private var watched: [String] = []
+    private var pendingPass: (due: DispatchTime, work: DispatchWorkItem)?
+    private var lastPass: DispatchTime?
+    /// The last pass wrote, failed or put something off (guarded by `lock`).
+    private var needsFollowUp = false
+    /// The ledger as the last pass left it, and the stamp of the file it agrees with. Archive
+    /// decisions are always on disk; refreshed copy mtimes may live only here (see `persist`).
+    private var cachedLedger: (file: Stamp?, ledger: Ledger)?
+    /// What the last pass that changed nothing saw. A pass that would see the same is skipped:
+    /// with the same files, the same ledger and the same Desktop state it would change nothing again.
+    private var quietInputs: PassInputs?
 
-    init(home: String, isDesktopRunning: @escaping () -> Bool = { true }) {
+    private struct PassInputs: Equatable {
+        let folders: [URL]
+        let stamps: [URL: [String: Stamp]]
+        let desktopClosed: Bool
+        let closed: Bool
+        let loaded: Set<URL>
+    }
+
+    init(home: String, isDesktopRunning: @escaping () -> Bool = { true },
+         isEnabled: @escaping () -> Bool = { ClaudeSessionSharing.isEnabled }, pace: Pace = Pace()) {
         self.home = URL(fileURLWithPath: home)
         self.isDesktopRunning = isDesktopRunning
+        self.isEnabled = isEnabled
+        self.pace = pace
     }
+
+    deinit { stopWatching() }
 
     private var defaultDataDir: URL { home.appendingPathComponent("Library/Application Support/Claude") }
     /// Claude Desktop keeps a separate data dir while third-party inference (CLIProxy) is on.
     private var thirdPartyDataDir: URL { home.appendingPathComponent("Library/Application Support/Claude-3p") }
     private var ledgerURL: URL { home.appendingPathComponent("Library/Application Support/GrandeBar/ClaudeSessionArchive.json") }
 
-    /// Syncs every few seconds while sharing is on.
+    /// Syncs after the session folders change while sharing is on, plus a slow safety pass.
     func startBackgroundSync() {
-        guard timer == nil else { return }
-        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
-        timer.schedule(deadline: .now() + 3, repeating: Self.interval, leeway: .seconds(2))
-        timer.setEventHandler { [weak self] in
-            guard Self.isEnabled else { return }
-            _ = self?.sync()
+        queue.async { [self] in
+            guard safetyTimer == nil else { return }
+            let timer = DispatchSource.makeTimerSource(queue: queue)
+            timer.schedule(deadline: .now() + pace.start, repeating: pace.safety, leeway: .milliseconds(Int(min(pace.start, 30) * 1000)))
+            timer.setEventHandler { [weak self] in self?.backgroundPass() }
+            timer.resume()
+            safetyTimer = timer
         }
-        timer.resume()
-        self.timer = timer
+    }
+
+    /// Something no folder shows has changed (Desktop quit, so its folders can catch up).
+    func syncSoon() {
+        queue.async { [weak self] in self?.schedulePass(after: 2, spaced: false) }
+    }
+
+    /// The earliest request wins; `spaced` passes also keep `pace.gap` from the last one.
+    private func schedulePass(after delay: TimeInterval, spaced: Bool) {
+        guard safetyTimer != nil, isEnabled() else { return }
+        var delay = delay
+        if spaced, let lastPass {
+            let since = Double(DispatchTime.now().uptimeNanoseconds &- lastPass.uptimeNanoseconds) / 1_000_000_000
+            delay = max(delay, pace.gap - since)
+        }
+        let due = DispatchTime.now() + delay
+        if let pendingPass, pendingPass.due <= due { return }
+        pendingPass?.work.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.pendingPass = nil
+            self?.backgroundPass()
+        }
+        pendingPass = (due, work)
+        queue.asyncAfter(deadline: due, execute: work)
+    }
+
+    private func backgroundPass() {
+        // Watched even while sharing is off, so turning it on needs no restart.
+        watch(sessionRoots().map(\.path))
+        guard isEnabled() else { return }
+        sync()
+        lastPass = .now()
+        lock.lock()
+        let again = needsFollowUp
+        lock.unlock()
+        // Its own writes come back as events too; either way the next pass is `pace.gap` away.
+        if again { schedulePass(after: pace.debounce, spaced: true) }
+    }
+
+    /// One FSEvents stream over the claude-code-sessions folders, replaced when the set changes.
+    private func watch(_ roots: [String]) {
+        guard roots != watched || (stream == nil && !roots.isEmpty) else { return }
+        stopWatching()
+        watched = roots
+        guard !roots.isEmpty else { return }
+        var context = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(),
+                                           retain: nil, release: nil, copyDescription: nil)
+        let changed: FSEventStreamCallback = { _, info, _, _, _, _ in
+            guard let info else { return }
+            let sharing = Unmanaged<ClaudeSessionSharing>.fromOpaque(info).takeUnretainedValue()
+            sharing.schedulePass(after: sharing.pace.debounce, spaced: true)
+        }
+        // Folder-level events are enough: a pass lists every folder anyway.
+        guard let stream = FSEventStreamCreate(nil, changed, &context, roots as CFArray,
+                                               FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 2, 0) else { return }
+        FSEventStreamSetDispatchQueue(stream, queue)
+        guard FSEventStreamStart(stream) else {
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            return
+        }
+        self.stream = stream
+    }
+
+    private func stopWatching() {
+        guard let stream else { return }
+        FSEventStreamStop(stream)
+        FSEventStreamInvalidate(stream)
+        FSEventStreamRelease(stream)
+        self.stream = nil
     }
 
     /// One pass over every account and org folder. Safe while Desktop runs; serialized.
@@ -103,6 +216,7 @@ final class ClaudeSessionSharing {
     func sync(desktopClosed: Bool = false) -> Result {
         lock.lock()
         defer { lock.unlock() }
+        needsFollowUp = false
         var result = Result()
         let all = storageDirs()
         result.folders = all.count
@@ -120,12 +234,31 @@ final class ClaudeSessionSharing {
         let settle = closed ? 0 : Self.settleNanoseconds
         func settled(_ mtime: Int64) -> Bool { now - mtime >= settle }
         var loaded = closed ? [] : signedInFolders(dirs)
+        let inputs = PassInputs(folders: all, stamps: stamps, desktopClosed: desktopClosed, closed: closed, loaded: loaded)
+        // Nothing moved since a pass that changed nothing: this one would change nothing either.
+        if inputs == quietInputs, cachedLedger.map({ $0.file == stamp(ledgerURL) }) ?? false { return result }
+        quietInputs = nil
         var ledger = loadLedger()
+        let started = ledger
         var saved = ledger
+        /// Files written or removed, copies held back or failed, or files too fresh to read.
+        var unsettled = listing.values.contains { $0.values.contains { !settled($0) } }
         func persist() {
             guard ledger != saved else { return }
-            saveLedger(ledger)
+            // A copy's mtime only spares re-reading an unchanged file, so a change of mtimes
+            // alone stays in memory; anything else is written before the pass acts on it.
+            if Self.durable(ledger) != Self.durable(saved) {
+                saveLedger(ledger)
+            } else if let cached = cachedLedger {
+                cachedLedger = (cached.file, ledger)
+            }
             saved = ledger
+        }
+        defer {
+            if !unsettled, result.added + result.updated + result.removed + result.failed == 0, ledger == started {
+                quietInputs = inputs
+            }
+            needsFollowUp = quietInputs == nil
         }
 
         // 1) Tombstones: spread them and drop the deleted sessions everywhere. Desktop removes a
@@ -145,6 +278,7 @@ final class ClaudeSessionSharing {
             let tomb = "deleted_" + id
             let lost = Set(ledger.tombstones[id] ?? []).intersection(folderKeys).subtracting(holders[id] ?? [])
             if !lost.isEmpty {
+                unsettled = true
                 let left = dirs.filter { listing[$0]?[tomb] != nil && (try? fm.removeItem(at: $0.appendingPathComponent(tomb))) == nil }
                 if left.isEmpty { ledger.tombstones[id] = nil }
                 tombSource[id] = nil
@@ -152,8 +286,11 @@ final class ClaudeSessionSharing {
             }
             var held = (ledger.tombstones[id] ?? []).filter(unknown.contains)
             for dir in dirs {
-                if listing[dir]?[tomb] != nil || (try? atomicCopy(source, to: dir.appendingPathComponent(tomb))) != nil {
+                if listing[dir]?[tomb] != nil {
                     held.append(folderKey(dir))
+                } else {
+                    unsettled = true
+                    if (try? atomicCopy(source, to: dir.appendingPathComponent(tomb))) != nil { held.append(folderKey(dir)) }
                 }
                 let session = "local_\(id).json"
                 if listing[dir]?[session] != nil, (try? fm.removeItem(at: dir.appendingPathComponent(session))) != nil {
@@ -257,7 +394,10 @@ final class ClaudeSessionSharing {
                 do {
                     // A copy held back (Desktop saved it or started meanwhile) keeps its old record.
                     guard try replace(dir.appendingPathComponent(name), listed: stamps[dir]?[name], with: contents,
-                                      mtime: source.mtime, mayWrite: { mayWrite(dir) }) else { continue }
+                                      mtime: source.mtime, mayWrite: { mayWrite(dir) }) else {
+                        unsettled = true
+                        continue
+                    }
                     ledger.copies[folderKey(dir), default: [:]][id] = Ledger.Copy(mtime: source.mtime, archived: archived)
                     if isNew { result.added += 1 } else { result.updated += 1 }
                 } catch {
@@ -366,18 +506,30 @@ final class ClaudeSessionSharing {
 
     // MARK: Ledger
 
+    /// Decoded again only when the file is not the one the cached copy agrees with.
     private func loadLedger() -> Ledger {
-        guard let data = try? Data(contentsOf: ledgerURL),
-              let ledger = try? JSONDecoder().decode(Ledger.self, from: data) else { return Ledger() }
+        let file = stamp(ledgerURL)
+        if let cachedLedger, cachedLedger.file == file { return cachedLedger.ledger }
+        let ledger = (try? Data(contentsOf: ledgerURL)).flatMap { try? JSONDecoder().decode(Ledger.self, from: $0) } ?? Ledger()
+        cachedLedger = (file, ledger)
         return ledger
     }
 
     private func saveLedger(_ ledger: Ledger) {
+        cachedLedger = nil
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         guard let data = try? encoder.encode(ledger) else { return }
         try? fm.createDirectory(at: ledgerURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: ledgerURL, options: .atomic)
+        guard (try? data.write(to: ledgerURL, options: .atomic)) != nil else { return }
+        cachedLedger = (stamp(ledgerURL), ledger)
+    }
+
+    /// The ledger without the copy mtimes: what has to survive a restart.
+    private static func durable(_ ledger: Ledger) -> Ledger {
+        var ledger = ledger
+        ledger.copies = ledger.copies.mapValues { $0.mapValues { Ledger.Copy(mtime: 0, archived: $0.archived) } }
+        return ledger
     }
 
     // MARK: Copying
@@ -540,7 +692,7 @@ final class ClaudeSessionSharing {
     }
 
     private static func isID(_ value: String) -> Bool {
-        value.count == 36 && value.allSatisfy { $0 == "-" || ("0"..."9").contains($0) || ("a"..."f").contains($0) }
+        value.utf8.count == 36 && value.utf8.allSatisfy { $0 == 0x2D || (0x30...0x39).contains($0) || (0x61...0x66).contains($0) }
     }
 
     private static func nowNanoseconds() -> Int64 {

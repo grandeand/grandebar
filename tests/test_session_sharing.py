@@ -22,6 +22,7 @@ func emit(_ result: ClaudeSessionSharing.Result) {
     ]
     let data = try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     print(String(data: data, encoding: .utf8)!)
+    fflush(stdout)
 }
 
 /// Desktop saving what it holds: staged *.flush files land with the current time.
@@ -71,6 +72,21 @@ let sharing = ClaudeSessionSharing(home: arguments[2], isDesktopRunning: {
 switch arguments[1] {
 case "sync":
     emit(sharing.sync(desktopClosed: mode[0] == "closed"))
+case "pair":
+    // Two background passes in one process, as GrandeBar's timer runs them; the test changes
+    // files between them and sends a line when it is done.
+    emit(sharing.sync())
+    _ = readLine()
+    emit(sharing.sync())
+case "watch":
+    // GrandeBar's background sync with short waits and no safety pass in reach: after the first
+    // pass, only a change in the session folders can start another one.
+    let watching = ClaudeSessionSharing(home: arguments[2], isDesktopRunning: { true }, isEnabled: { true },
+                                        pace: .init(debounce: 0.3, gap: 0.5, safety: 3600, start: 0.1))
+    watching.startBackgroundSync()
+    print("watching")
+    fflush(stdout)
+    _ = readLine()
 case "switch":
     // GrandeBar's switch: quit Desktop, restore the account, sync while closed, relaunch.
     let desktop = FakeDesktop(home: arguments[2])
@@ -448,6 +464,67 @@ class ArchiveTests(Sandbox):
         self.assertEqual({path: (path.stat().st_mtime_ns, path.read_bytes()) for path in files}, before)
         self.assertEqual((self.ledger().stat().st_mtime_ns, self.ledger().read_bytes()), ledger)
         self.assertEqual(self.archived(kept, *self.folders), [False, False, False])
+
+    def pair(self, change):
+        """A pass, `change()`, then a second pass of the same GrandeBar process."""
+        process = subprocess.Popen([str(BINARY), "pair", str(self.home), "running"], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, text=True)
+        first = json.loads(process.stdout.readline())
+        change()
+        process.stdin.write("\n")
+        process.stdin.flush()
+        second = json.loads(process.stdout.readline())
+        process.stdin.close()
+        process.stdout.close()
+        process.wait(timeout=30)
+        return first, second
+
+    def test_a_change_after_a_quiet_pass_is_still_synced(self):
+        sid = self.shared()
+        first, second = self.pair(lambda: self.write(self.b, sid, age=100, isArchived=True))
+        self.assertEqual((first["added"], first["updated"]), (0, 0))
+        self.assertEqual(second["updated"], 2)
+        self.assertEqual(self.archived(sid, *self.folders), [True, True, True])
+
+    def test_a_new_session_after_a_quiet_pass_is_still_synced(self):
+        self.shared()
+        sid = str(uuid.uuid4())
+        _, second = self.pair(lambda: self.write(self.c, sid, age=100))
+        self.assertEqual(second["added"], 2)
+        self.assertIsNotNone(self.read(self.a, sid))
+
+    def test_a_quiet_pass_with_nothing_new_changes_nothing(self):
+        self.shared()
+        ledger = self.ledger().read_bytes()
+        first, second = self.pair(lambda: None)
+        for result in (first, second):
+            self.assertEqual({key: result[key] for key in ("added", "updated", "removed", "failed")},
+                             {"added": 0, "updated": 0, "removed": 0, "failed": 0})
+        self.assertEqual(self.ledger().read_bytes(), ledger)
+
+    def test_background_sync_follows_a_change_in_the_folders(self):
+        self.shared()
+        process = subprocess.Popen([str(BINARY), "watch", str(self.home)], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(process.stdout.readline().strip(), "watching")
+            time.sleep(2)  # the first pass, and the watch it sets up
+            sid = str(uuid.uuid4())
+            self.write(self.c, sid, age=100)
+            deadline = time.time() + 30
+            while self.read(self.a, sid) is None and time.time() < deadline:
+                time.sleep(0.2)
+            self.assertIsNotNone(self.read(self.a, sid), "the change was not picked up")
+            # An archive saved later spreads too, keeping its distance from the pass before it.
+            self.write(self.a, sid, age=0, isArchived=True)
+            deadline = time.time() + 30
+            while not self.read(self.b, sid)["isArchived"] and time.time() < deadline:
+                time.sleep(0.2)
+            self.assertEqual(self.archived(sid, *self.folders), [True, True, True])
+        finally:
+            process.stdin.close()
+            process.stdout.close()
+            process.wait(timeout=30)
 
     def test_only_the_archive_values_change_in_a_patched_copy(self):
         self.signed_in(ACCOUNT_B)
