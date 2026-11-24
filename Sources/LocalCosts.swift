@@ -42,14 +42,22 @@ struct LocalCosts {
     /// nil where GrandeClaudex's gdc is not installed: no Antigravity cost, and the total leaves it out.
     var antigravity: CostReading? = nil
 
-    /// The total needs every cost it adds up: when one cannot be computed, neither can the sum.
+    /// Antigravity's cost is read over SSH from another Mac, so the total leaves it out when it
+    /// cannot be read rather than going blank (the footer's tooltip says so).
+    var totalLeavesOutAntigravity: Bool {
+        if case .unavailable = antigravity { return true }
+        return false
+    }
+
+    /// The total needs every cost it adds up: when GrandeCodex or Claude cannot be computed,
+    /// neither can the sum.
     func reading(for view: CostView) -> CostReading {
         switch view {
         case .grandeCodex: return grandeCodex
         case .claude: return claude
         case .antigravity: return antigravity ?? .unavailable
         case .total:
-            let parts = [grandeCodex, claude] + (antigravity.map { [$0] } ?? [])
+            let parts = [grandeCodex, claude] + (antigravity.map { totalLeavesOutAntigravity ? [] : [$0] } ?? [])
             var usages: [LocalUsage] = []
             for part in parts {
                 switch part {

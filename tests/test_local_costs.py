@@ -89,6 +89,8 @@ case "fit":
     for (title, chip, amounts) in [
         ("GrandeCodex", true, fiveDigits),
         ("Claude", true, fiveDigits),
+        ("Antigravity", true, fiveDigits),
+        ("Antigravity", true, "Bugün $99.999 · Hafta $99.999 · Ay $99.999"),
         ("Total", true, fiveDigits),
         ("Toplam", true, "Bugün $99.999 · Hafta $99.999 · Ay $99.999"),
         ("Cost", false, fiveDigits),
@@ -205,7 +207,9 @@ class LocalCostsTests(unittest.TestCase):
         self.assertEqual(views["withAntigravity"]["total"],
                          {"today": 4.0, "week": 34.75, "month": 129.75, "models": ["NEON", "OPUS", "gpt-6-sol"]})
         self.assertEqual(views["antigravityLoading"]["total"], "loading")
-        self.assertEqual(views["antigravityUnavailable"]["total"], "unavailable")
+        # An Antigravity cost that cannot be read (Mac mini away) is left out rather than blanking the total.
+        self.assertEqual(views["antigravityUnavailable"]["total"],
+                         {"today": 3.5, "week": 30.75, "month": 120.75, "models": ["OPUS", "gpt-6-sol"]})
         # GrandeCodex + Claude alone when gdc is not there.
         self.assertEqual(views["both"]["total"]["today"], 3.5)
 
@@ -307,8 +311,9 @@ class LocalCostsTests(unittest.TestCase):
                 self.assertLessEqual(result["needed"], result["width"] + 0.01)
                 self.assertLessEqual(result["right"], result["footerWidth"] + 0.01)
                 self.assertGreaterEqual(result["fontSize"], 9)
-        # Only five digits beside the long GrandeCodex chip need the short period names.
-        self.assertEqual([result["title"] for result in results if result["shown"] != result["amounts"]], ["GrandeCodex"])
+        # Only five digits beside the long GrandeCodex and Antigravity chips need the short period names.
+        self.assertEqual([result["title"] for result in results if result["shown"] != result["amounts"]],
+                         ["GrandeCodex", "Antigravity"])
         # Everyday amounts keep the usual size, and only the chip is a button.
         self.assertEqual([result["fontSize"] for result in results[-2:]], [10, 10])
         self.assertEqual([result["role"] for result in results[-2:]], ["AXButton", "AXStaticText"])

@@ -1432,6 +1432,10 @@ final class QuotaViewController: NSViewController {
             if case .unavailable = localCosts.claude {
                 lines.append(L.text("Claude Code cost unavailable", "Claude Code maliyeti hesaplanamadı"))
             }
+            if claudexInstalled, localCosts.totalLeavesOutAntigravity {
+                lines.append(L.text("Antigravity cost could not be read, so the total leaves it out",
+                                    "Antigravity maliyeti okunamadı; toplam onsuz"))
+            }
         }
         let next = view.next(withAntigravity: claudexInstalled)
         lines.append(L.text("Click → \(next.title)", "Tıkla → \(next.title)"))
@@ -5775,8 +5779,9 @@ extension QuotaViewController {
     /// right away.
     private func refreshClaudex(probeNow: Bool = false) {
         guard AppConfig.mode() != .codex, claudexInstalled else { return }
-        // With the popover closed nobody sees the result; opening it reads again.
-        guard probeNow || isOnScreen else { return }
+        // With the popover closed nobody sees the result; opening it reads again. Antigravity mode
+        // still takes gdc's cache once at launch, for its menu bar numbers.
+        guard probeNow || isOnScreen || (AppConfig.mode() == .antigravity && claudex == nil) else { return }
         guard !claudexInFlight else {
             if probeNow, !claudexProbing { claudexProbeQueued = true }
             return
