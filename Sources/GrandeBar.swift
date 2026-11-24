@@ -323,6 +323,19 @@ private extension CostView {
     }
 }
 
+/// One bar of an account card that names its own rows (the Antigravity cards: two quota groups,
+/// each with a 5h and a weekly window).
+private struct CardRow {
+    let title: String
+    let percent: Int?
+    let resetSeconds: Int?
+    /// Weekly rows only (`WeeklyPace`); feeds the pace tick and the pace summary.
+    var pace: Int? = nil
+    /// The pace summary's name for the row; nil keeps the row out of it.
+    var paceLabel: String? = nil
+    var toolTip: String? = nil
+}
+
 /// A button on an account card, e.g. the Claudex chief card's "Move the Chief".
 private struct CardAction {
     let title: String
@@ -370,6 +383,8 @@ private struct QuotaCard {
     var seatToolTip: String? = nil
     /// A button at the end of the seat line (the chief card's "Move the Chief").
     var action: CardAction? = nil
+    /// Rows that replace the 5h / weekly / model weekly ones; nil for those.
+    var rows: [CardRow]? = nil
 
     var isLocked: Bool {
         if allowed == false { return true }
@@ -390,12 +405,19 @@ private struct QuotaCard {
     }
 
     var hasPace: Bool {
-        weeklyPace != nil || modelWeeklyPace != nil
+        if let rows { return rows.contains { $0.pace != nil && $0.paceLabel != nil } }
+        return weeklyPace != nil || modelWeeklyPace != nil
     }
 
     /// The weekly rows (general, then the model one) for the pace summary over a list.
     var paceAccount: WeeklyPace.Account {
         let local = self.name.split(separator: "@").first.map(String.init) ?? self.name
+        if let explicit = self.rows {
+            let paced = explicit.compactMap { row in
+                row.paceLabel.map { WeeklyPace.Row(label: $0, remainingPercent: row.percent, pacePercent: row.pace) }
+            }
+            return WeeklyPace.Account(name: shortName ?? local, rows: paced)
+        }
         var rows = [WeeklyPace.Row(label: weeklyLabel ?? L.text("Weekly", "Haftalık"), remainingPercent: weeklyPercent, pacePercent: weeklyPace)]
         if let modelWeeklyLabel {
             rows.append(WeeklyPace.Row(label: modelWeeklyLabel, remainingPercent: modelWeeklyPercent, pacePercent: modelWeeklyPace))
@@ -2208,7 +2230,14 @@ private final class AccountCardView: NSView {
             row.toolTip = [L.text("Weekly limit · \(label)", "Haftalık sınır · \(label)"), row.toolTip].compactMap { $0 }.joined(separator: "\n")
             return row
         }
-        let rows = [session, weekly] + (modelWeekly.map { [$0] } ?? [])
+        let rows = card.rows.map { explicit in
+            explicit.map { row -> MetricView in
+                let view = MetricView(title: row.title, percent: row.percent, resetSeconds: row.resetSeconds,
+                                      pace: row.pace, titleWidth: 78)
+                view.toolTip = [row.toolTip, view.toolTip].compactMap { $0 }.joined(separator: "\n")
+                return view
+            }
+        } ?? [session, weekly] + (modelWeekly.map { [$0] } ?? [])
 
         let footer = NSTextField(labelWithString: footerText(card))
         footer.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
@@ -2233,7 +2262,7 @@ private final class AccountCardView: NSView {
             chip.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             chip.centerYAnchor.constraint(equalTo: name.centerYAnchor),
 
-            footer.leadingAnchor.constraint(equalTo: session.leadingAnchor),
+            footer.leadingAnchor.constraint(equalTo: rows[0].leadingAnchor),
             footer.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -12),
             footer.topAnchor.constraint(equalTo: (seat ?? resetLine ?? lastRow).bottomAnchor, constant: 6),
             footer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -11)
@@ -2609,7 +2638,7 @@ private final class MetricView: NSView {
     /// `pace` (weekly rows, Claude) puts a tick on the bar where an evenly spent week would leave
     /// it and marks the gap to it on the bar (`ProgressBar`); the numbers are in the row's tooltip,
     /// so the row carries no extra text and its bar keeps its length.
-    init(title: String, percent: Int?, resetSeconds: Int?, pace: Int? = nil) {
+    init(title: String, percent: Int?, resetSeconds: Int?, pace: Int? = nil, titleWidth: CGFloat = 52) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
@@ -2647,7 +2676,7 @@ private final class MetricView: NSView {
 
             titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            titleLabel.widthAnchor.constraint(equalToConstant: 52),
+            titleLabel.widthAnchor.constraint(equalToConstant: titleWidth),
 
             timeLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
             timeLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -5580,6 +5609,8 @@ extension QuotaViewController {
             return paceSummary(cards) + [AccountsGroupView(cards: cards, activeName: activeClaudeCard(in: latestCards)?.card.name)]
         case .claudex:
             return claudexContent()
+        case .antigravity:
+            return antigravityContent()
         case .cliproxy:
             if let cliproxyProblem { return [makeErrorBox(cliproxyProblem)] }
             guard !latestCards.isEmpty else {
@@ -5598,7 +5629,7 @@ extension QuotaViewController {
         guard tab != claudeTab else { return }
         AppConfig.setClaudeTab(tab)
         rebuildClaudeTabContent(withTabs: true)
-        if tab == .claudex {
+        if tab.readsGdc {
             refreshClaudex()
         }
     }
@@ -5619,7 +5650,7 @@ extension QuotaViewController {
         // Only the Claudex tab probes on its own; the other tabs' chief menus take gdc's cache,
         // which gdc keeps fresh itself.
         let due = lastClaudexProbeAt.map { Date().timeIntervalSince($0) > AppConfig.claudexProbeInterval - 5 } ?? true
-        let probe = probeNow || (claudeTab == .claudex && due)
+        let probe = probeNow || (claudeTab.readsGdc && due)
         claudexInFlight = true
         claudexProbing = probe
         lastClaudexReadAt = Date()
@@ -5681,7 +5712,7 @@ extension QuotaViewController {
         case .failure(let failure):
             claudexProblem = Self.describe(failure)
         }
-        guard AppConfig.mode() == .claude, claudeTab == .claudex else { return }
+        guard AppConfig.mode() == .claude, claudeTab.readsGdc else { return }
         rebuildClaudeTabContent()
     }
 
@@ -5689,29 +5720,9 @@ extension QuotaViewController {
     /// is nothing to show yet, a gdc failure gets the error box; later it stays on the status line
     /// above the last read.
     private func claudexContent() -> [NSView] {
-        let header = NSView()
-        header.translatesAutoresizingMaskIntoConstraints = false
-        let label = NSTextField(labelWithString: "")
-        label.font = .systemFont(ofSize: 10.5, weight: .regular)
-        label.lineBreakMode = .byTruncatingTail
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let probe = iconButton("arrow.clockwise", action: #selector(probeClaudex))
-        probe.toolTip = L.text("Read the chief's and every worker's limits now (Claude Code's /usage, no model call)",
-                               "Şefin ve tüm worker'ların limitlerini şimdi oku (Claude Code /usage, model çağrısı yok)")
-        header.addSubview(label)
-        header.addSubview(probe)
-        NSLayoutConstraint.activate([
-            header.heightAnchor.constraint(equalToConstant: 20),
-            label.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 4),
-            label.centerYAnchor.constraint(equalTo: header.centerYAnchor),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: probe.leadingAnchor, constant: -6),
-            probe.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: 2),
-            probe.centerYAnchor.constraint(equalTo: header.centerYAnchor)
-        ])
-        claudexStatusLabel = label
-        claudexProbeButton = probe
-        updateClaudexStatus()
+        let header = gdcStatusHeader(probeToolTip: L.text(
+            "Read the chief's and every worker's limits now (Claude Code's /usage, no model call)",
+            "Şefin ve tüm worker'ların limitlerini şimdi oku (Claude Code /usage, model çağrısı yok)"))
 
         guard let snapshot = claudex else {
             return claudexProblem.map { [header, makeErrorBox($0)] } ?? [header]
@@ -5726,6 +5737,111 @@ extension QuotaViewController {
         return [header] + paceSummary(cards) + [AccountsGroupView(cards: cards)]
     }
 
+    /// The Antigravity tab: the same status line and probe button as the Claudex tab (one gdc read
+    /// fills both), then one card per account with its Gemini and Claude/GPT windows.
+    private func antigravityContent() -> [NSView] {
+        let header = gdcStatusHeader(probeToolTip: L.text(
+            "Read every Antigravity account's quota now (agy's /usage on the Mac the account lives on, no quota spent)",
+            "Tüm Antigravity hesaplarının kotasını şimdi oku (hesabın durduğu Mac'te agy /usage, kota harcamaz)"))
+        guard let snapshot = claudex else {
+            return claudexProblem.map { [header, makeErrorBox($0)] } ?? [header]
+        }
+        guard !snapshot.antigravity.isEmpty else {
+            return [header, makeInfoBox(L.text(
+                "GrandeClaudex reports no Antigravity accounts. Add one with gdc ag add.",
+                "GrandeClaudex hiç Antigravity hesabı bildirmiyor. gdc ag add ile eklenir."))]
+        }
+        let now = Date()
+        let cards = snapshot.antigravity.map { antigravityCard($0, now: now) }
+        return [header] + paceSummary(cards) + [AccountsGroupView(cards: cards)]
+    }
+
+    /// An Antigravity account as an account card: email, "Antigravity · <alias>" chip, then for each
+    /// quota group its 5h and weekly rows ("Gemini 5h", "Gemini week", "Claude 5h", ...).
+    private func antigravityCard(_ account: AntigravityAccount, now: Date) -> QuotaCard {
+        var rows: [CardRow] = []
+        var resetSince = false
+        for group in account.groups {
+            let name = group.id == "3p" ? "Claude" : group.label
+            let five = account.loggedIn ? group.fiveHourWindow(now: now) : nil
+            let week = account.loggedIn ? group.sevenDayWindow(now: now) : nil
+            resetSince = resetSince || five?.hasReset == true || week?.hasReset == true
+            let what = group.id == "3p"
+                ? L.text("Claude and GPT models", "Claude ve GPT modelleri")
+                : L.text("\(group.label) models", "\(group.label) modelleri")
+            func floorNote(_ floor: Double?) -> String? {
+                floor.map { L.text("GrandeClaudex leaves the last \(Int(($0 * 100).rounded()))% for other work",
+                                   "GrandeClaudex son %\(Int(($0 * 100).rounded()))'u başka işe bırakır") }
+            }
+            rows.append(CardRow(
+                title: L.text("\(name) 5h", "\(name) 5 sa"),
+                percent: five?.remainingPercent, resetSeconds: five?.resetSeconds,
+                toolTip: ([L.text("5-hour limit · \(what)", "5 saatlik sınır · \(what)")] + [floorNote(group.fiveHourFloor)].compactMap { $0 })
+                    .joined(separator: "\n")))
+            rows.append(CardRow(
+                title: L.text("\(name) week", "\(name) hafta"),
+                percent: week?.remainingPercent, resetSeconds: week?.resetSeconds,
+                pace: week?.pacePercent, paceLabel: name,
+                toolTip: ([L.text("Weekly limit · \(what)", "Haftalık sınır · \(what)")] + [floorNote(group.sevenDayFloor)].compactMap { $0 })
+                    .joined(separator: "\n")))
+        }
+        if rows.isEmpty {
+            // Not read yet: the two groups' rows with no numbers, so every card has the same shape.
+            rows = ["Gemini", "Claude"].flatMap { name in [
+                CardRow(title: L.text("\(name) 5h", "\(name) 5 sa"), percent: nil, resetSeconds: nil),
+                CardRow(title: L.text("\(name) week", "\(name) hafta"), percent: nil, resetSeconds: nil)
+            ] }
+        }
+        let note: String
+        if !account.loggedIn {
+            note = L.text("\(account.alias) · not logged in", "\(account.alias) · oturum açık değil")
+        } else if let error = account.error {
+            note = L.text("\(account.alias) · read failed: \(error)", "\(account.alias) · okunamadı: \(error)")
+        } else if let checkedAt = account.checkedAt {
+            note = lastReadNote(account.alias, at: checkedAt, resetSince: resetSince)
+        } else {
+            note = L.text("\(account.alias) · not read yet", "\(account.alias) · henüz okunmadı")
+        }
+        return QuotaCard(
+            name: account.email ?? account.alias, plan: "Antigravity",
+            sessionPercent: nil, sessionResetSeconds: nil, weeklyPercent: nil, weeklyResetSeconds: nil,
+            resetCreditsAvailableCount: nil, resetCreditExpiries: [],
+            allowed: nil, limitReached: nil, updatedAt: now,
+            headline: "Antigravity · \(account.alias)",
+            note: note,
+            shortName: account.alias,
+            rows: rows
+        )
+    }
+
+    /// The gdc tabs' status line with the probe button; the label is updated in place
+    /// (`updateClaudexStatus`).
+    private func gdcStatusHeader(probeToolTip: String) -> NSView {
+        let header = NSView()
+        header.translatesAutoresizingMaskIntoConstraints = false
+        let label = NSTextField(labelWithString: "")
+        label.font = .systemFont(ofSize: 10.5, weight: .regular)
+        label.lineBreakMode = .byTruncatingTail
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let probe = iconButton("arrow.clockwise", action: #selector(probeClaudex))
+        probe.toolTip = probeToolTip
+        header.addSubview(label)
+        header.addSubview(probe)
+        NSLayoutConstraint.activate([
+            header.heightAnchor.constraint(equalToConstant: 20),
+            label.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 4),
+            label.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: probe.leadingAnchor, constant: -6),
+            probe.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: 2),
+            probe.centerYAnchor.constraint(equalTo: header.centerYAnchor)
+        ])
+        claudexStatusLabel = label
+        claudexProbeButton = probe
+        updateClaudexStatus()
+        return header
+    }
+
     /// The weekly pace summary over a Claude list, or nothing (`PaceSummaryView.make`).
     private func paceSummary(_ cards: [QuotaCard]) -> [NSView] {
         PaceSummaryView.make(cards: cards).map { [$0] } ?? []
@@ -5738,10 +5854,16 @@ extension QuotaViewController {
         let text: String
         var failed = false
         if claudexProbing {
-            text = L.text("Reading the workers' limits…", "Worker limitleri okunuyor…")
+            text = claudeTab == .antigravity
+                ? L.text("Reading the Antigravity quota…", "Antigravity kotası okunuyor…")
+                : L.text("Reading the workers' limits…", "Worker limitleri okunuyor…")
         } else if let problem = claudexProblem, claudex != nil {
             text = problem
             failed = true
+        } else if let snapshot = claudex, claudeTab == .antigravity {
+            let read = snapshot.antigravity.filter { !$0.groups.isEmpty && $0.error == nil }.count
+            text = L.text("\(snapshot.antigravity.count) Antigravity accounts · \(read) read",
+                          "\(snapshot.antigravity.count) Antigravity hesabı · \(read) okundu")
         } else if let snapshot = claudex {
             let signedIn = snapshot.workers.filter(\.loggedIn).count
             let now = Date()
