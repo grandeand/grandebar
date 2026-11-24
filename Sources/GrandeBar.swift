@@ -846,7 +846,7 @@ final class QuotaViewController: NSViewController {
     }
 
     @objc func refreshQuota() {
-        loadViewIfNeeded()
+        _ = view  // loads the view; loadViewIfNeeded() needs macOS 14
         guard !isRefreshing, !isWarming else { return }
         if showSettingsIfNeeded(refreshAfterSave: true) {
             return
@@ -892,7 +892,7 @@ final class QuotaViewController: NSViewController {
     }
 
     @objc private func warmSessionsClicked() {
-        loadViewIfNeeded()
+        _ = view  // loads the view; loadViewIfNeeded() needs macOS 14
         guard !isRefreshing, !isWarming else { return }
         if showSettingsIfNeeded(refreshAfterSave: false) {
             return
@@ -942,7 +942,7 @@ final class QuotaViewController: NSViewController {
     }
 
     fileprivate func switchMode(to mode: AppMode) {
-        loadViewIfNeeded()
+        _ = view  // loads the view; loadViewIfNeeded() needs macOS 14
         guard mode != AppConfig.mode(), !isWarming else { return }
 
         AppConfig.setMode(mode)
