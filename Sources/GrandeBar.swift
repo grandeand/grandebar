@@ -5,11 +5,23 @@ import ServiceManagement
 private enum AppMode: String, CaseIterable {
     case codex
     case claude
+    /// GrandeClaudex's Antigravity accounts (Google's agy), read through gdc; no CLIProxy.
+    case antigravity
 
     var title: String {
         switch self {
         case .codex: return "Codex"
         case .claude: return "Claude"
+        case .antigravity: return "Antigravity"
+        }
+    }
+
+    /// The mode's colour on the mode switch, the chips and the menu bar gauge.
+    var accent: NSColor {
+        switch self {
+        case .codex: return .systemBlue
+        case .claude: return Theme.claudeAccent
+        case .antigravity: return Theme.antigravityAccent
         }
     }
 }
@@ -20,7 +32,7 @@ private enum AppConfig {
     /// Refreshes probe the GrandeClaudex workers (Claude Code's `/usage`, no model call) at most this often.
     static let claudexProbeInterval: TimeInterval = 5 * 60
     static let startModeKey = "startMode"
-    static let startModeOptions = ["last", "codex", "claude"]
+    static let startModeOptions = ["last", "codex", "claude", "antigravity"]
     static let defaultAPIBase = "http://localhost:8317"
     static let claudeDefaultAPIBase = "http://127.0.0.1:8317"
     static let claudeAPIBaseKey = "claudeApiBase"
@@ -83,12 +95,14 @@ private enum AppConfig {
         switch mode {
         case .codex:
             return normalizedBase(UserDefaults.standard.string(forKey: apiBaseKey) ?? defaultAPIBase)
-        case .claude:
+        case .claude, .antigravity:
             return normalizedBase(UserDefaults.standard.string(forKey: claudeAPIBaseKey) ?? claudeDefaultAPIBase)
         }
     }
 
     static func managementKey(for mode: AppMode) -> String {
+        // Antigravity is read through gdc, never through CLIProxy.
+        guard mode != .antigravity else { return "" }
         let key = mode == .codex ? defaultsKey : claudeManagementKeyKey
         let saved = (UserDefaults.standard.string(forKey: key) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if saved.isEmpty, mode == .claude {
@@ -147,6 +161,7 @@ private enum AppConfig {
         switch mode {
         case .codex: return UserDefaults.standard.object(forKey: automaticWarmupKey) as? Bool ?? true
         case .claude: return UserDefaults.standard.object(forKey: claudeAutomaticWarmupKey) as? Bool ?? true
+        case .antigravity: return false
         }
     }
 
@@ -278,7 +293,8 @@ private enum Theme {
     static let mutedText = NSColor.tertiaryLabelColor
     static let buttonTint = NSColor.labelColor.withAlphaComponent(0.82)
     static let claudeAccent = NSColor(calibratedRed: 0.85, green: 0.47, blue: 0.34, alpha: 1)
-    static var accent: NSColor { AppConfig.mode() == .claude ? claudeAccent : .systemBlue }
+    static let antigravityAccent = NSColor(calibratedRed: 0.58, green: 0.42, blue: 0.96, alpha: 1)
+    static var accent: NSColor { AppConfig.mode().accent }
     static var shadow: NSColor { NSColor.black.withAlphaComponent(isDark ? 0.10 : 0.20) }
 }
 
@@ -589,7 +605,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     /// Claude mode tints the menu bar gauge so the active mode is visible without opening the popover.
     private func applyModeToStatusItem() {
-        statusItem.button?.contentTintColor = AppConfig.mode() == .claude ? Theme.claudeAccent : nil
+        statusItem.button?.contentTintColor = AppConfig.mode() == .codex ? nil : AppConfig.mode().accent
     }
 
     private func setStatusTitle(_ title: String) {
@@ -850,6 +866,7 @@ final class QuotaViewController: NSViewController {
             // Stored reads show "last read" times and reset countdowns relative to now.
             rebuildClaudeTabContent()
         }
+        if AppConfig.mode() == .antigravity { renderAntigravity() }
         // Background refreshes leave GrandeClaudex alone, so it is read when the popover opens.
         if lastClaudexReadAt.map({ Date().timeIntervalSince($0) > 60 }) ?? true { refreshClaudex() }
     }
@@ -870,6 +887,11 @@ final class QuotaViewController: NSViewController {
     @objc func refreshQuota() {
         _ = view  // loads the view; loadViewIfNeeded() needs macOS 14
         guard !isRefreshing, !isWarming else { return }
+        if AppConfig.mode() == .antigravity {
+            renderAntigravity()
+            refreshClaudex(probeNow: isOnScreen)
+            return
+        }
         if showSettingsIfNeeded(refreshAfterSave: true) {
             return
         }
@@ -1055,7 +1077,7 @@ final class QuotaViewController: NSViewController {
 
     @discardableResult
     func showSettingsIfNeeded(refreshAfterSave: Bool) -> Bool {
-        guard !AppConfig.hasManagementKey(), !AppConfig.proxySetupSkipped else { return false }
+        guard AppConfig.mode() != .antigravity, !AppConfig.hasManagementKey(), !AppConfig.proxySetupSkipped else { return false }
         showSettings(isInitialSetup: true, refreshAfterSave: refreshAfterSave)
         return true
     }
@@ -1212,7 +1234,7 @@ final class QuotaViewController: NSViewController {
                 }
             }
             setLaunchAtLogin(launchAtLogin.state == .on)
-            if skippedProxy && AppConfig.mode() != .claude {
+            if skippedProxy && AppConfig.mode() == .codex {
                 // Claude mode is where GrandeBar works without CLIProxy; switching refreshes.
                 switchMode(to: .claude)
             } else if refreshAfterSave && (AppConfig.hasManagementKey() || skippedProxy) {
@@ -1264,6 +1286,8 @@ final class QuotaViewController: NSViewController {
         case .claude:
             readLocalCost(into: \.grandeCodex) { LocalCodexUsage.read(.grandeCodex) }
             readLocalCost(into: \.claude) { LocalClaudeUsage.read() }
+        case .antigravity:
+            break
         }
     }
 
@@ -1283,7 +1307,11 @@ final class QuotaViewController: NSViewController {
 
     /// Codex mode: a plain "Cost" label and real Codex use. Claude mode: a chip that cycles.
     private func renderCost() {
+        // Antigravity has no local cost to show.
+        costFooter.isHidden = AppConfig.mode() == .antigravity
         switch AppConfig.mode() {
+        case .antigravity:
+            return
         case .codex:
             let line = costLineText(localCosts.codex)
             costFooter.show(title: L.text("Cost", "Maliyet"), tint: nil, amounts: line.full, shortAmounts: line.short)
@@ -1866,6 +1894,17 @@ final class QuotaViewController: NSViewController {
     }
 
     private func usageTableText() -> String {
+        if AppConfig.mode() == .antigravity {
+            let now = Date()
+            let lines = (claudex?.antigravity ?? []).map { account -> String in
+                let windows = account.groups.map { group -> String in
+                    let left = { (window: GrandeClaudexWindow?) in window.map { "\($0.remainingPercent)%" } ?? "--" }
+                    return "\(group.label) 5h \(left(group.fiveHourWindow(now: now))) left, week \(left(group.sevenDayWindow(now: now))) left"
+                }
+                return "- \(account.alias) (\(account.email ?? account.id)): " + (windows.isEmpty ? "not read yet" : windows.joined(separator: "; "))
+            }
+            return (["Antigravity quota"] + lines).joined(separator: "\n")
+        }
         // Codex mode: real Codex only. Claude mode: GrandeCodex, Claude Code and Total.
         let usageLine = AppConfig.mode() == .codex
             ? costSummaryLine(name: L.text("Codex cost", "Codex maliyeti"), localCosts.codex)
@@ -2763,7 +2802,7 @@ private final class ModeTabsView: NSView {
                 segment.layer?.shadowRadius = 1.5
                 segment.layer?.shadowOffset = NSSize(width: 0, height: -0.5)
             }
-            let dot = RoundedView(color: mode == .claude ? Theme.claudeAccent : .systemBlue, radius: 3)
+            let dot = RoundedView(color: mode.accent, radius: 3)
             dot.translatesAutoresizingMaskIntoConstraints = false
             let label = NSTextField(labelWithString: mode.title)
             label.font = .systemFont(ofSize: 11.5, weight: isSelected ? .semibold : .regular)
@@ -5609,8 +5648,6 @@ extension QuotaViewController {
             return paceSummary(cards) + [AccountsGroupView(cards: cards, activeName: activeClaudeCard(in: latestCards)?.card.name)]
         case .claudex:
             return claudexContent()
-        case .antigravity:
-            return antigravityContent()
         case .cliproxy:
             if let cliproxyProblem { return [makeErrorBox(cliproxyProblem)] }
             guard !latestCards.isEmpty else {
@@ -5629,7 +5666,7 @@ extension QuotaViewController {
         guard tab != claudeTab else { return }
         AppConfig.setClaudeTab(tab)
         rebuildClaudeTabContent(withTabs: true)
-        if tab.readsGdc {
+        if tab == .claudex {
             refreshClaudex()
         }
     }
@@ -5640,7 +5677,7 @@ extension QuotaViewController {
     /// `claudexProbeInterval` old; otherwise it only reads gdc's cache. The tab's button probes
     /// right away.
     private func refreshClaudex(probeNow: Bool = false) {
-        guard AppConfig.mode() == .claude, claudexInstalled else { return }
+        guard AppConfig.mode() != .codex, claudexInstalled else { return }
         // With the popover closed nobody sees the result; opening it reads again.
         guard probeNow || isOnScreen else { return }
         guard !claudexInFlight else {
@@ -5650,7 +5687,7 @@ extension QuotaViewController {
         // Only the Claudex tab probes on its own; the other tabs' chief menus take gdc's cache,
         // which gdc keeps fresh itself.
         let due = lastClaudexProbeAt.map { Date().timeIntervalSince($0) > AppConfig.claudexProbeInterval - 5 } ?? true
-        let probe = probeNow || (claudeTab.readsGdc && due)
+        let probe = probeNow || (due && (AppConfig.mode() == .antigravity || claudeTab == .claudex))
         claudexInFlight = true
         claudexProbing = probe
         lastClaudexReadAt = Date()
@@ -5708,11 +5745,16 @@ extension QuotaViewController {
             claudexSeat = nil
             claudexProblem = nil
             if AppConfig.mode() == .claude { rebuildClaudeTabContent(withTabs: true) }
+            if AppConfig.mode() == .antigravity { renderAntigravity() }
             return
         case .failure(let failure):
             claudexProblem = Self.describe(failure)
         }
-        guard AppConfig.mode() == .claude, claudeTab.readsGdc else { return }
+        if AppConfig.mode() == .antigravity {
+            renderAntigravity()
+            return
+        }
+        guard AppConfig.mode() == .claude, claudeTab == .claudex else { return }
         rebuildClaudeTabContent()
     }
 
@@ -5737,9 +5779,59 @@ extension QuotaViewController {
         return [header] + paceSummary(cards) + [AccountsGroupView(cards: cards)]
     }
 
-    /// The Antigravity tab: the same status line and probe button as the Claudex tab (one gdc read
-    /// fills both), then one card per account with its Gemini and Claude/GPT windows.
+    /// Antigravity mode: the status line with its probe button, then one card per account. The
+    /// subtitle counts the accounts and the menu bar shows the Gemini averages.
+    private func renderAntigravity() {
+        clearCards()
+        let accounts = claudex?.antigravity ?? []
+        let read = accounts.filter { !$0.groups.isEmpty }.count
+        setSubtitle(accounts.isEmpty
+            ? L.text("Antigravity quota", "Antigravity kota")
+            : L.text("\(accounts.count) accounts · \(read) read", "\(accounts.count) hesap · \(read) okundu"))
+        setDetailLine(nil)
+        setHeaderActionsEnabled(true)
+        for view in antigravityContent() {
+            stackView.addArrangedSubview(view)
+            view.widthAnchor.constraint(equalToConstant: currentCardWidth()).isActive = true
+        }
+        resizeDocument()
+        updateAntigravityStatusItem(accounts)
+        renderCost()
+    }
+
+    /// The menu bar's two lines in Antigravity mode: the Gemini 5h and weekly windows left, on
+    /// average over the accounts read; the tooltip lists every account's four windows.
+    private func updateAntigravityStatusItem(_ accounts: [AntigravityAccount]) {
+        let now = Date()
+        func gemini(_ account: AntigravityAccount) -> AntigravityQuotaGroup? {
+            account.groups.first { $0.id == "gemini" }
+        }
+        func average(_ values: [Int]) -> String {
+            values.isEmpty ? "--%" : "\(Int((Double(values.reduce(0, +)) / Double(values.count)).rounded()))%"
+        }
+        let live = accounts.filter(\.loggedIn)
+        let five = live.compactMap { gemini($0)?.fiveHourWindow(now: now)?.remainingPercent }
+        let week = live.compactMap { gemini($0)?.sevenDayWindow(now: now)?.remainingPercent }
+        let title = "\(paddedMenuBarPercent(average(five)))\n\(paddedMenuBarPercent(average(week)))"
+        let lines = accounts.map { account -> String in
+            let windows = account.groups.map { group -> String in
+                let left = { (window: GrandeClaudexWindow?) in window.map { "\($0.remainingPercent)%" } ?? "--" }
+                return "\(group.label) 5h \(left(group.fiveHourWindow(now: now))), \(L.text("week", "hafta")) \(left(group.sevenDayWindow(now: now)))"
+            }
+            return "\(account.alias): " + (windows.isEmpty ? L.text("not read yet", "henüz okunmadı") : windows.joined(separator: " · "))
+        }
+        let header = L.text("Antigravity · Gemini average (5h, week)", "Antigravity · Gemini ortalaması (5 sa, hafta)")
+        statusUpdate(title, ([header] + lines).joined(separator: "\n"))
+    }
+
+    /// The Antigravity accounts: the same status line and probe button as the Claudex tab (one gdc
+    /// read fills both), then one card per account with its Gemini and Claude/GPT windows.
     private func antigravityContent() -> [NSView] {
+        guard claudexInstalled else {
+            return [makeInfoBox(L.text(
+                "Antigravity accounts are read through GrandeClaudex's gdc (~/.local/bin/gdc), which is not installed.",
+                "Antigravity hesapları GrandeClaudex'in gdc'siyle (~/.local/bin/gdc) okunur; gdc kurulu değil."))]
+        }
         let header = gdcStatusHeader(probeToolTip: L.text(
             "Read every Antigravity account's quota now (agy's /usage on the Mac the account lives on, no quota spent)",
             "Tüm Antigravity hesaplarının kotasını şimdi oku (hesabın durduğu Mac'te agy /usage, kota harcamaz)"))
@@ -5807,7 +5899,7 @@ extension QuotaViewController {
             sessionPercent: nil, sessionResetSeconds: nil, weeklyPercent: nil, weeklyResetSeconds: nil,
             resetCreditsAvailableCount: nil, resetCreditExpiries: [],
             allowed: nil, limitReached: nil, updatedAt: now,
-            headline: "Antigravity · \(account.alias)",
+            headline: account.alias.capitalized,
             note: note,
             shortName: account.alias,
             rows: rows
@@ -5854,13 +5946,13 @@ extension QuotaViewController {
         let text: String
         var failed = false
         if claudexProbing {
-            text = claudeTab == .antigravity
+            text = AppConfig.mode() == .antigravity
                 ? L.text("Reading the Antigravity quota…", "Antigravity kotası okunuyor…")
                 : L.text("Reading the workers' limits…", "Worker limitleri okunuyor…")
         } else if let problem = claudexProblem, claudex != nil {
             text = problem
             failed = true
-        } else if let snapshot = claudex, claudeTab == .antigravity {
+        } else if let snapshot = claudex, AppConfig.mode() == .antigravity {
             let read = snapshot.antigravity.filter { !$0.groups.isEmpty && $0.error == nil }.count
             text = L.text("\(snapshot.antigravity.count) Antigravity accounts · \(read) read",
                           "\(snapshot.antigravity.count) Antigravity hesabı · \(read) okundu")

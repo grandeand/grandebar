@@ -558,10 +558,7 @@ class GrandeClaudexTests(unittest.TestCase):
         return json.loads(result.stdout)
 
     def test_claudex_tab_only_with_gdc(self):
-        self.assertEqual(self.tabs("claudex", True), {"visible": ["Desktop", "Claudex", "CLIProxy", "Antigravity"], "selected": "Claudex"})
-        # Antigravity is read through the same gdc, so it comes and goes with the Claudex tab.
-        self.assertEqual(self.tabs("antigravity", True)["selected"], "Antigravity")
-        self.assertEqual(self.tabs("antigravity", False), {"visible": ["Desktop", "CLIProxy"], "selected": "Desktop"})
+        self.assertEqual(self.tabs("claudex", True), {"visible": ["Desktop", "Claudex", "CLIProxy"], "selected": "Claudex"})
         self.assertEqual(self.tabs("claudex", False), {"visible": ["Desktop", "CLIProxy"], "selected": "Desktop"})
         self.assertEqual(self.tabs("cliproxy", False)["selected"], "CLIProxy")
         self.assertEqual(self.tabs("", False)["selected"], "Desktop")
