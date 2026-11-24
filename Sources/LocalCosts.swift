@@ -6,12 +6,19 @@ import Foundation
 enum CostView: String, CaseIterable {
     case grandeCodex
     case claude
+    /// GrandeClaudex's Antigravity accounts, read through gdc; left out where gdc is not installed.
+    case antigravity
     case total
 
-    /// A click on the footer moves on: GrandeCodex → Claude → Total → GrandeCodex.
+    /// A click on the footer moves on: GrandeCodex → Claude → Antigravity → Total → GrandeCodex.
     var next: CostView {
-        let views = CostView.allCases
-        return views[(views.firstIndex(of: self)! + 1) % views.count]
+        next(withAntigravity: true)
+    }
+
+    func next(withAntigravity: Bool) -> CostView {
+        let views = CostView.allCases.filter { withAntigravity || $0 != .antigravity }
+        let index = views.firstIndex(of: self) ?? views.firstIndex(of: .total)!
+        return views[(index + 1) % views.count]
     }
 
     /// The view picked last, or Claude until one is picked.
@@ -32,26 +39,34 @@ struct LocalCosts {
     var codex: CostReading = .loading
     var grandeCodex: CostReading = .loading
     var claude: CostReading = .loading
+    /// nil where GrandeClaudex's gdc is not installed: no Antigravity cost, and the total leaves it out.
+    var antigravity: CostReading? = nil
 
-    /// The total needs both costs: when one cannot be computed, neither can the sum.
+    /// The total needs every cost it adds up: when one cannot be computed, neither can the sum.
     func reading(for view: CostView) -> CostReading {
         switch view {
         case .grandeCodex: return grandeCodex
         case .claude: return claude
+        case .antigravity: return antigravity ?? .unavailable
         case .total:
-            switch (grandeCodex, claude) {
-            case let (.usage(grandeCodex), .usage(claude)):
-                return .usage(LocalUsage(
-                    today: grandeCodex.today + claude.today,
-                    week: grandeCodex.week + claude.week,
-                    month: grandeCodex.month + claude.month,
-                    models: Array(Set(grandeCodex.models + claude.models)).sorted()
-                ))
-            case (.unavailable, _), (_, .unavailable):
-                return .unavailable
-            default:
-                return .loading
+            let parts = [grandeCodex, claude] + (antigravity.map { [$0] } ?? [])
+            var usages: [LocalUsage] = []
+            for part in parts {
+                switch part {
+                case .usage(let usage): usages.append(usage)
+                case .unavailable: return .unavailable
+                case .loading: break
+                }
             }
+            guard usages.count == parts.count else {
+                return parts.contains { if case .unavailable = $0 { return true } else { return false } } ? .unavailable : .loading
+            }
+            return .usage(LocalUsage(
+                today: usages.reduce(0) { $0 + $1.today },
+                week: usages.reduce(0) { $0 + $1.week },
+                month: usages.reduce(0) { $0 + $1.month },
+                models: Array(Set(usages.flatMap(\.models))).sorted()
+            ))
         }
     }
 }

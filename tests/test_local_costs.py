@@ -49,8 +49,22 @@ case "views":
         "claudeLoading": views(LocalCosts(grandeCodex: .usage(grandeCodex), claude: .loading)),
         "grandeCodexUnavailable": views(LocalCosts(grandeCodex: .unavailable, claude: .usage(claude))),
         "unavailableWhileLoading": views(LocalCosts(grandeCodex: .loading, claude: .unavailable)),
-        "nothingRead": views(LocalCosts())
+        "nothingRead": views(LocalCosts()),
+        "withAntigravity": views(LocalCosts(grandeCodex: .usage(grandeCodex), claude: .usage(claude),
+                                            antigravity: .usage(LocalUsage(today: 0.5, week: 4, month: 9, models: ["NEON"])))),
+        "antigravityLoading": views(LocalCosts(grandeCodex: .usage(grandeCodex), claude: .usage(claude), antigravity: .loading)),
+        "antigravityUnavailable": views(LocalCosts(grandeCodex: .usage(grandeCodex), claude: .usage(claude), antigravity: .unavailable))
     ])
+case "agy":
+    // gdc ag cost --json, priced for a fixed day.
+    let data = FileManager.default.contents(atPath: arguments[2])!
+    let now = Date(timeIntervalSince1970: Double(arguments[3])!)
+    if let reading = AntigravityCost.reading(from: data, now: now) {
+        emit(["today": reading.usage.today, "week": reading.usage.week, "month": reading.usage.month,
+              "models": reading.usage.models, "unpriced": reading.unpriced, "failed": reading.failed])
+    } else {
+        emit(["unreadable": true])
+    }
 case "read":
     // Every cost read from transcripts under a test home.
     let home = arguments[2]
@@ -62,6 +76,7 @@ case "read":
 case "cycle":
     emit([
         "next": Dictionary(uniqueKeysWithValues: CostView.allCases.map { ($0.rawValue, $0.next.rawValue) }),
+        "nextWithoutGdc": Dictionary(uniqueKeysWithValues: CostView.allCases.map { ($0.rawValue, $0.next(withAntigravity: false).rawValue) }),
         "default": CostView.resolved(nil).rawValue,
         "storedTotal": CostView.resolved("total").rawValue,
         "storedGrandeCodex": CostView.resolved("grandeCodex").rawValue,
@@ -180,8 +195,63 @@ class LocalCostsTests(unittest.TestCase):
         self.assertEqual(views["grandeCodexUnavailable"]["total"], "unavailable")
         self.assertEqual(views["grandeCodexUnavailable"]["claude"]["today"], 2)
         self.assertEqual(views["unavailableWhileLoading"]["total"], "unavailable")
+        # Without gdc (no Antigravity reading) the total is GrandeCodex + Claude and Antigravity is unavailable.
         self.assertEqual(views["nothingRead"],
-                         {"codex": "loading", "grandeCodex": "loading", "claude": "loading", "total": "loading"})
+                         {"codex": "loading", "grandeCodex": "loading", "claude": "loading", "antigravity": "unavailable",
+                          "total": "loading"})
+
+    def test_total_adds_antigravity_when_it_is_read(self):
+        views = self.run_harness("views")
+        self.assertEqual(views["withAntigravity"]["total"],
+                         {"today": 4.0, "week": 34.75, "month": 129.75, "models": ["NEON", "OPUS", "gpt-6-sol"]})
+        self.assertEqual(views["antigravityLoading"]["total"], "loading")
+        self.assertEqual(views["antigravityUnavailable"]["total"], "unavailable")
+        # GrandeCodex + Claude alone when gdc is not there.
+        self.assertEqual(views["both"]["total"]["today"], 3.5)
+
+    def test_antigravity_tokens_are_priced_per_model_and_day(self):
+        # 2026-11-26 12:00 local: a Thursday; the week starts on Monday the 23rd.
+        now = datetime(2026, 11, 26, 12, 0).timestamp()
+        body = {"accounts": [
+            {"id": "ag-1", "alias": "talisca", "days": {
+                "2026-11-26": {"gemini-4-neon": [1_000_000, 1_000_000, 1_000_000, 3],      # 3 + 0.15 + 15
+                               "claude-opus-5-5-high": [1_000_000, 0, 0, 1],              # 4
+                               "gpt-oss-120b": [10, 0, 10, 1]},                           # no price
+                "2026-11-23": {"gemini-4-argon-trial": [1_000_000, 0, 1_000_000, 2]},     # 2 + 10 (before Dec 1)
+                "2026-11-02": {"gemini-pro-orchestrator-neon": [0, 0, 1_000_000, 1]},     # 15, month only
+                "2026-10-30": {"gemini-4-neon": [1_000_000, 0, 0, 1]}}},                   # last month: left out
+            {"id": "ag-2", "alias": "cenk", "days": {
+                "2026-11-26": {"gemini-flash-worker-agy": [1_000_000, 0, 0, 1],            # 0.75 (3.8 Flash)
+                               "gemini-4-hydrogen": [0, 1_000_000, 0, 1]}}},              # 0.075
+            {"id": "ag-3", "alias": "sosa", "days": None, "error": "ssh: macmini unreachable"}]}
+        path = self.work / "agy.json"
+        path.write_text(json.dumps(body))
+        result = subprocess.run([str(self.binary), "agy", str(path), str(now)], check=True, capture_output=True, text=True)
+        got = json.loads(result.stdout)
+        self.assertAlmostEqual(got["today"], 3 + 0.15 + 15 + 4 + 0.75 + 0.075)
+        self.assertAlmostEqual(got["week"], got["today"] + 12)
+        self.assertAlmostEqual(got["month"], got["week"] + 15)
+        self.assertEqual(got["unpriced"], ["gpt-oss-120b"])
+        self.assertEqual(got["failed"], ["sosa"])
+        self.assertEqual(got["models"], ["ARGON", "FLASH", "HYDROGEN", "NEON", "OPUS"])
+
+    def test_argon_costs_more_from_december(self):
+        now = datetime(2026, 12, 2, 12, 0).timestamp()
+        body = {"accounts": [{"id": "ag-1", "alias": "talisca", "days": {
+            "2026-12-02": {"gemini-4-carbon": [1_000_000, 0, 1_000_000, 1]}}}]}
+        path = self.work / "agy.json"
+        path.write_text(json.dumps(body))
+        got = json.loads(subprocess.run([str(self.binary), "agy", str(path), str(now)], check=True, capture_output=True,
+                                        text=True).stdout)
+        self.assertAlmostEqual(got["today"], 4 + 20)
+
+    def test_no_account_read_is_unavailable(self):
+        body = {"accounts": [{"id": "ag-1", "alias": "talisca", "days": None, "error": "down"}]}
+        path = self.work / "agy.json"
+        path.write_text(json.dumps(body))
+        got = json.loads(subprocess.run([str(self.binary), "agy", str(path), "1795700000"], check=True,
+                                        capture_output=True, text=True).stdout)
+        self.assertEqual(got, {"unreadable": True})
 
     def test_real_codex_and_grandecodex_read_separate_homes(self):
         home = Path(tempfile.mkdtemp(prefix="home.", dir=self.work))
@@ -218,7 +288,12 @@ class LocalCostsTests(unittest.TestCase):
 
     def test_clicks_cycle_grandecodex_claude_total_and_start_on_claude(self):
         cycle = self.run_harness("cycle")
-        self.assertEqual(cycle["next"], {"grandeCodex": "claude", "claude": "total", "total": "grandeCodex"})
+        self.assertEqual(cycle["next"], {"grandeCodex": "claude", "claude": "antigravity", "antigravity": "total",
+                                         "total": "grandeCodex"})
+        # Without gdc there is no Antigravity view to click to.
+        # A stored Antigravity view shows as the total there, so its click goes on from the total.
+        self.assertEqual(cycle["nextWithoutGdc"], {"grandeCodex": "claude", "claude": "total", "antigravity": "grandeCodex",
+                                                   "total": "grandeCodex"})
         self.assertEqual(cycle["default"], "claude")
         self.assertEqual(cycle["storedTotal"], "total")
         self.assertEqual(cycle["storedGrandeCodex"], "grandeCodex")

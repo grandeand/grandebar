@@ -31,6 +31,7 @@ SOURCES=(
   "$ROOT/Sources/LocalCosts.swift"
   "$ROOT/Sources/GrandeBarUpdater.swift"
   "$ROOT/Sources/QuotaFile.swift"
+  "$ROOT/Sources/AntigravityCost.swift"
   "$ROOT/Sources/main.swift"
 )
 for ARCH in arm64 x86_64; do

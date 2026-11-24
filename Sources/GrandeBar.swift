@@ -52,13 +52,23 @@ private enum AppConfig {
     /// "Don't show again" on the Remote Control note after the chief moved.
     static let chiefMoveNoteHiddenKey = "chiefMoveRemoteControlNoteHidden"
 
+    /// Whether GrandeClaudex's gdc is installed, so Antigravity mode can be read; checked at launch
+    /// and whenever the popover opens. Without it the mode is not offered.
+    static var antigravityAvailable = GrandeClaudexCLI.locate() != nil
+
+    /// The modes on the switch.
+    static var modes: [AppMode] {
+        AppMode.allCases.filter { $0 != .antigravity || antigravityAvailable }
+    }
+
     static func mode() -> AppMode {
-        AppMode(rawValue: UserDefaults.standard.string(forKey: modeKey) ?? "") ?? .codex
+        let mode = AppMode(rawValue: UserDefaults.standard.string(forKey: modeKey) ?? "") ?? .codex
+        return modes.contains(mode) ? mode : .claude
     }
 
     /// Tab shown whenever the popover opens; `nil` keeps the last used tab.
     static func startMode() -> AppMode? {
-        AppMode(rawValue: UserDefaults.standard.string(forKey: startModeKey) ?? "last")
+        AppMode(rawValue: UserDefaults.standard.string(forKey: startModeKey) ?? "last").map { modes.contains($0) ? $0 : .claude }
     }
 
     static func startModeTitle(for option: String) -> String {
@@ -303,15 +313,17 @@ private extension CostView {
         switch self {
         case .grandeCodex: return "GrandeCodex"
         case .claude: return "Claude"
+        case .antigravity: return "Antigravity"
         case .total: return L.text("Total", "Toplam")
         }
     }
 
-    /// Codex blue and Claude orange as on the mode switch; the total is neutral.
+    /// Codex blue, Claude orange and Antigravity purple as on the mode switch; the total is neutral.
     var tint: NSColor {
         switch self {
         case .grandeCodex: return .systemBlue
         case .claude: return Theme.claudeAccent
+        case .antigravity: return Theme.antigravityAccent
         case .total: return .labelColor
         }
     }
@@ -324,8 +336,11 @@ private extension CostView {
         case .claude:
             return L.text("Claude Code cost, GrandeClaudex Claude workers included",
                           "Claude Code maliyeti, GrandeClaudex Claude worker'ları dahil")
+        case .antigravity:
+            return L.text("Antigravity cost: the GrandeClaudex Antigravity accounts at Gemini API prices (gdc ag cost)",
+                          "Antigravity maliyeti: GrandeClaudex Antigravity hesapları, Gemini API fiyatlarıyla (gdc ag cost)")
         case .total:
-            return L.text("Total: Claude Code + GrandeCodex cost", "Toplam: Claude Code + GrandeCodex maliyeti")
+            return L.text("Total: Claude Code + GrandeCodex + Antigravity cost", "Toplam: Claude Code + GrandeCodex + Antigravity maliyeti")
         }
     }
 
@@ -334,6 +349,7 @@ private extension CostView {
         switch self {
         case .grandeCodex: return L.text("GrandeCodex cost", "GrandeCodex maliyeti")
         case .claude: return L.text("Claude Code cost", "Claude Code maliyeti")
+        case .antigravity: return L.text("Antigravity cost", "Antigravity maliyeti")
         case .total: return L.text("Total cost", "Toplam maliyet")
         }
     }
@@ -442,7 +458,7 @@ private struct QuotaCard {
     }
 }
 
-struct LocalUsage {
+struct LocalUsage: Equatable {
     let today: Double
     let week: Double
     let month: Double
@@ -666,6 +682,11 @@ final class QuotaViewController: NSViewController {
     private var desktopFetchInFlight = false
     private var localCosts = LocalCosts()
     private var costReadsInFlight = Set<KeyPath<LocalCosts, CostReading>>()
+    /// The Antigravity cost (gdc ag cost on the Mac the accounts live on): its last good reading
+    /// stays when a read fails, so a Mac mini outage does not blank the total.
+    private var antigravityCostInFlight = false
+    private var antigravityCostReadAt: Date?
+    private var antigravityCostNote: String?
     /// What the CLIProxy tab shows when it has no pool to list.
     private var cliproxyProblem: String?
     /// Whether GrandeClaudex's gdc is installed, checked again whenever the popover opens; without
@@ -685,6 +706,8 @@ final class QuotaViewController: NSViewController {
     private var claudexProbeQueued = false
     private var lastClaudexProbeAt: Date?
     private var lastClaudexReadAt: Date?
+    /// Antigravity mode probes only its own accounts, on its own clock.
+    private var lastAntigravityProbeAt: Date?
     /// The popover is open. GrandeClaudex is only read then: its numbers are shown nowhere else,
     /// and a probe starts Claude Code once per worker.
     private var isOnScreen = false
@@ -859,6 +882,10 @@ final class QuotaViewController: NSViewController {
         startElapsedTimer()
         // gdc may have been installed or removed since the popover last opened.
         let installed = GrandeClaudexCLI.locate() != nil
+        if installed != AppConfig.antigravityAvailable {
+            AppConfig.antigravityAvailable = installed
+            reloadViewForAppearance()
+        }
         if installed != claudexInstalled {
             claudexInstalled = installed
             rebuildClaudeTabContent(withTabs: true)
@@ -867,6 +894,7 @@ final class QuotaViewController: NSViewController {
             rebuildClaudeTabContent()
         }
         if AppConfig.mode() == .antigravity { renderAntigravity() }
+        if AppConfig.mode() != .codex { readAntigravityCost() }
         // Background refreshes leave GrandeClaudex alone, so it is read when the popover opens.
         if lastClaudexReadAt.map({ Date().timeIntervalSince($0) > 60 }) ?? true { refreshClaudex() }
     }
@@ -1091,7 +1119,7 @@ final class QuotaViewController: NSViewController {
         let appearancePopup = NSPopUpButton(frame: .zero, pullsDown: false)
         let languagePopup = NSPopUpButton(frame: .zero, pullsDown: false)
         let startModePopup = NSPopUpButton(frame: .zero, pullsDown: false)
-        for option in AppConfig.startModeOptions {
+        for option in AppConfig.startModeOptions where AppMode(rawValue: option).map(AppConfig.modes.contains) ?? true {
             startModePopup.addItem(withTitle: AppConfig.startModeTitle(for: option))
             startModePopup.lastItem?.representedObject = option
         }
@@ -1254,7 +1282,9 @@ final class QuotaViewController: NSViewController {
     private func reloadViewForAppearance() {
         let cards = latestCards
         loadView()
-        if !cards.isEmpty {
+        if AppConfig.mode() == .antigravity {
+            renderAntigravity()
+        } else if !cards.isEmpty {
             render(cards: cards)
         }
     }
@@ -1286,8 +1316,52 @@ final class QuotaViewController: NSViewController {
         case .claude:
             readLocalCost(into: \.grandeCodex) { LocalCodexUsage.read(.grandeCodex) }
             readLocalCost(into: \.claude) { LocalClaudeUsage.read() }
+            readAntigravityCost()
         case .antigravity:
-            break
+            readAntigravityCost()
+        }
+    }
+
+    /// Reads the Antigravity cost through gdc, at most every 10 minutes and only while the popover
+    /// is open or nothing was read yet: gdc reads agy's records over SSH on the Mac mini.
+    private func readAntigravityCost(force: Bool = false) {
+        guard claudexInstalled else {
+            localCosts.antigravity = nil
+            return
+        }
+        if localCosts.antigravity == nil { localCosts.antigravity = .loading }
+        guard !antigravityCostInFlight else { return }
+        let fresh = antigravityCostReadAt.map { Date().timeIntervalSince($0) < 10 * 60 } ?? false
+        guard force || !fresh, isOnScreen || antigravityCostReadAt == nil else { return }
+        antigravityCostInFlight = true
+        DispatchQueue.global(qos: .utility).async {
+            let result = GrandeClaudexCLI.antigravityCost().flatMap { data in
+                AntigravityCost.reading(from: data).map { Result.success($0) } ?? .failure(.unreadable)
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.antigravityCostInFlight = false
+                self.antigravityCostReadAt = Date()
+                switch result {
+                case .success(let reading):
+                    self.localCosts.antigravity = .usage(reading.usage)
+                    var notes: [String] = []
+                    if !reading.unpriced.isEmpty {
+                        notes.append(L.text("No price for \(reading.unpriced.joined(separator: ", ")); left out",
+                                            "\(reading.unpriced.joined(separator: ", ")) için fiyat yok; hesaba katılmadı"))
+                    }
+                    if !reading.failed.isEmpty {
+                        notes.append(L.text("Not read: \(reading.failed.joined(separator: ", "))",
+                                            "Okunamadı: \(reading.failed.joined(separator: ", "))"))
+                    }
+                    self.antigravityCostNote = notes.isEmpty ? nil : notes.joined(separator: "\n")
+                case .failure(let failure):
+                    // The last good reading stays; without one the cost is unavailable.
+                    if case .usage = self.localCosts.antigravity {} else { self.localCosts.antigravity = .unavailable }
+                    self.antigravityCostNote = L.text("Last read failed: ", "Son okuma başarısız: ") + Self.describe(failure)
+                }
+                self.renderCost()
+            }
         }
     }
 
@@ -1307,37 +1381,50 @@ final class QuotaViewController: NSViewController {
 
     /// Codex mode: a plain "Cost" label and real Codex use. Claude mode: a chip that cycles.
     private func renderCost() {
-        // Antigravity has no local cost to show.
-        costFooter.isHidden = AppConfig.mode() == .antigravity
+        costFooter.isHidden = AppConfig.mode() == .antigravity && !claudexInstalled
         switch AppConfig.mode() {
         case .antigravity:
-            return
+            let line = costLineText(localCosts.reading(for: .antigravity))
+            costFooter.show(title: CostView.antigravity.title, tint: CostView.antigravity.tint, amounts: line.full, shortAmounts: line.short)
         case .codex:
             let line = costLineText(localCosts.codex)
             costFooter.show(title: L.text("Cost", "Maliyet"), tint: nil, amounts: line.full, shortAmounts: line.short)
         case .claude:
-            let view = AppConfig.costView()
+            let view = shownCostView
             let line = costLineText(localCosts.reading(for: view))
             costFooter.show(title: view.title, tint: view.tint, amounts: line.full, shortAmounts: line.short)
         }
         costFooter.toolTip = costTooltip()
     }
 
+    /// The Claude footer's view; Antigravity's falls back to the total where gdc is missing.
+    private var shownCostView: CostView {
+        let view = AppConfig.costView()
+        return view == .antigravity && !claudexInstalled ? .total : view
+    }
+
     private func cycleCostView() {
         guard AppConfig.mode() == .claude else { return }
-        AppConfig.setCostView(AppConfig.costView().next)
+        AppConfig.setCostView(shownCostView.next(withAntigravity: claudexInstalled))
         renderCost()
     }
 
     /// Names the cost on screen and, in Claude mode, the next one; the refresh age stays last.
     private func costTooltip() -> String {
+        if AppConfig.mode() == .antigravity {
+            return ([CostView.antigravity.detail, antigravityCostNote].compactMap { $0 }
+                + [lastRefreshLabel.stringValue]).joined(separator: "\n")
+        }
         guard AppConfig.mode() == .claude else {
             return [L.text("Codex cost: every Codex home except the GrandeClaudex workers",
                            "Codex maliyeti: GrandeClaudex worker'ları hariç tüm Codex home'ları"),
                     lastRefreshLabel.stringValue].joined(separator: "\n")
         }
-        let view = AppConfig.costView()
+        let view = shownCostView
         var lines = [view.detail]
+        if view == .antigravity || (view == .total && claudexInstalled), let antigravityCostNote {
+            lines.append(antigravityCostNote)
+        }
         if view == .total {
             if case .unavailable = localCosts.grandeCodex {
                 lines.append(L.text("GrandeCodex cost unavailable", "GrandeCodex maliyeti hesaplanamadı"))
@@ -1346,7 +1433,8 @@ final class QuotaViewController: NSViewController {
                 lines.append(L.text("Claude Code cost unavailable", "Claude Code maliyeti hesaplanamadı"))
             }
         }
-        lines.append(L.text("Click → \(view.next.title)", "Tıkla → \(view.next.title)"))
+        let next = view.next(withAntigravity: claudexInstalled)
+        lines.append(L.text("Click → \(next.title)", "Tıkla → \(next.title)"))
         lines.append(lastRefreshLabel.stringValue)
         return lines.joined(separator: "\n")
     }
@@ -1903,12 +1991,14 @@ final class QuotaViewController: NSViewController {
                 }
                 return "- \(account.alias) (\(account.email ?? account.id)): " + (windows.isEmpty ? "not read yet" : windows.joined(separator: "; "))
             }
-            return (["Antigravity quota"] + lines).joined(separator: "\n")
+            let cost = costSummaryLine(name: CostView.antigravity.summaryName, localCosts.reading(for: .antigravity))
+            return ([cost, "Antigravity quota"] + lines).joined(separator: "\n")
         }
         // Codex mode: real Codex only. Claude mode: GrandeCodex, Claude Code and Total.
         let usageLine = AppConfig.mode() == .codex
             ? costSummaryLine(name: L.text("Codex cost", "Codex maliyeti"), localCosts.codex)
             : CostView.allCases
+                .filter { $0 != .antigravity || claudexInstalled }
                 .map { costSummaryLine(name: $0.summaryName, localCosts.reading(for: $0), isTotal: $0 == .total) }
                 .joined(separator: "\n")
 
@@ -2793,7 +2883,7 @@ private final class ModeTabsView: NSView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
-        for mode in AppMode.allCases {
+        for mode in AppConfig.modes {
             let isSelected = mode == selected
             let segment = RoundedView(color: isSelected ? Theme.segmentThumb : .clear, radius: 6)
             if isSelected {
@@ -2844,8 +2934,9 @@ private final class ModeTabsView: NSView {
     override func mouseUp(with event: NSEvent) {
         guard isEnabled else { return }
         let point = convert(event.locationInWindow, from: nil)
-        let index = min(AppMode.allCases.count - 1, max(0, Int(point.x / max(1, bounds.width) * CGFloat(AppMode.allCases.count))))
-        onSelect(AppMode.allCases[index])
+        let modes = AppConfig.modes
+        let index = min(modes.count - 1, max(0, Int(point.x / max(1, bounds.width) * CGFloat(modes.count))))
+        onSelect(modes[index])
     }
 
     override func mouseDown(with event: NSEvent) {}
@@ -4686,6 +4777,12 @@ enum LocalClaudeUsage {
         var entries: [String: Entry] = [:]
     }
 
+    /// A Claude model's list price (USD per million tokens), for Claude used elsewhere (Antigravity).
+    static func basePrice(model: String) -> (input: Double, output: Double, cacheRead: Double)? {
+        let model = model.lowercased()
+        return prices.first(where: { model.contains($0.id) }).map { ($0.input, $0.output, $0.cacheRead) }
+    }
+
     /// USD per million tokens. Ordered so a more specific id wins over its prefix.
     private static let prices: [(id: String, input: Double, output: Double, cacheRead: Double)] = [
         ("fable-5-1", 10, 50, 0.25),
@@ -5684,22 +5781,35 @@ extension QuotaViewController {
             if probeNow, !claudexProbing { claudexProbeQueued = true }
             return
         }
-        // Only the Claudex tab probes on its own; the other tabs' chief menus take gdc's cache,
-        // which gdc keeps fresh itself.
-        let due = lastClaudexProbeAt.map { Date().timeIntervalSince($0) > AppConfig.claudexProbeInterval - 5 } ?? true
-        let probe = probeNow || (due && (AppConfig.mode() == .antigravity || claudeTab == .claudex))
+        // Only the Claudex tab and Antigravity mode probe on their own; the other tabs' chief menus
+        // take gdc's cache, which gdc keeps fresh itself.
+        let antigravity = AppConfig.mode() == .antigravity
+        let last = antigravity ? lastAntigravityProbeAt : lastClaudexProbeAt
+        let due = last.map { Date().timeIntervalSince($0) > AppConfig.claudexProbeInterval - 5 } ?? true
+        let probe = probeNow || (due && (antigravity || claudeTab == .claudex))
+        // Antigravity's probe reads its own accounts only (agy's /usage), not the Claude workers,
+        // once their ids are known; the rest of the last snapshot stays.
+        let ids = antigravity && probe ? (claudex?.antigravity.map(\.id) ?? []) : []
+        let previous = claudex
         claudexInFlight = true
         claudexProbing = probe
         lastClaudexReadAt = Date()
-        if probe { lastClaudexProbeAt = Date() }
+        if probe {
+            if antigravity { lastAntigravityProbeAt = Date() } else { lastClaudexProbeAt = Date() }
+        }
         updateClaudexStatus()
         DispatchQueue.global(qos: .utility).async {
-            let result = GrandeClaudexCLI.fetch(probe: probe)
-            let seat = Self.readChiefSeat(after: result)
+            var result = GrandeClaudexCLI.fetch(probe: probe, ids: ids)
+            if !ids.isEmpty, case .success(let accounts) = result, let previous {
+                result = .success(GrandeClaudexSnapshot(chief: previous.chief, chiefUsage: previous.chiefUsage,
+                                                        generatedAt: accounts.generatedAt, workers: previous.workers,
+                                                        antigravity: accounts.antigravity))
+            }
+            let seat = ids.isEmpty ? Self.readChiefSeat(after: result) : nil
             DispatchQueue.main.async {
                 self.claudexInFlight = false
                 self.claudexProbing = false
-                if case .success = result { self.claudexSeat = seat }
+                if case .success = result, ids.isEmpty { self.claudexSeat = seat }
                 self.applyClaudex(result)
                 if self.claudexProbeQueued {
                     self.claudexProbeQueued = false

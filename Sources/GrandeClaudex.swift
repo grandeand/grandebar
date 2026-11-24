@@ -260,9 +260,16 @@ enum GrandeClaudexCLI {
     /// `gdc usage --json`, or with `probe` `gdc usage --json --probe`, which reads every worker's
     /// limits again first. Blocks until gdc exits or the timeout stops it, so call it off the main
     /// thread.
-    static func fetch(probe: Bool, executable: String? = nil, timeout: TimeInterval? = nil) -> Result<GrandeClaudexSnapshot, Failure> {
-        run(["usage", "--json"] + (probe ? ["--probe"] : []), executable: executable, timeout: timeout ?? defaultTimeout(probe: probe))
+    /// `ids` reads only those workers (and no chief record), e.g. the Antigravity accounts alone.
+    static func fetch(probe: Bool, ids: [String] = [], executable: String? = nil, timeout: TimeInterval? = nil) -> Result<GrandeClaudexSnapshot, Failure> {
+        run(["usage", "--json"] + (probe ? ["--probe"] : []) + ids, executable: executable, timeout: timeout ?? defaultTimeout(probe: probe))
             .flatMap { data in parse(data).map { .success($0) } ?? .failure(.unreadable) }
+    }
+
+    /// `gdc ag cost --json`: the Antigravity accounts' token use per day and model, read on the
+    /// Mac they live on, as gdc printed it (`AntigravityCost` prices it). Blocking.
+    static func antigravityCost(executable: String? = nil, timeout: TimeInterval = 180) -> Result<Data, Failure> {
+        run(["ag", "cost", "--json"], executable: executable, timeout: timeout)
     }
 
     /// `gdc chief-seat --json`: the account Claude Desktop runs the chief on. Blocking.
