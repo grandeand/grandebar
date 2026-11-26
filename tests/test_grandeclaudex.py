@@ -53,7 +53,23 @@ func describe(_ snapshot: GrandeClaudexSnapshot, now: Date) -> [String: Any] {
         "chief": snapshot.chief ?? NSNull(),
         "chiefUsage": snapshot.chiefUsage.map { describeWorker($0, now: now) } ?? NSNull(),
         "generatedAt": snapshot.generatedAt?.timeIntervalSince1970 ?? NSNull(),
-        "workers": snapshot.workers.map { describeWorker($0, now: now) }
+        "workers": snapshot.workers.map { describeWorker($0, now: now) },
+        "antigravity": snapshot.antigravity.map { account -> [String: Any] in
+            [
+                "id": account.id, "alias": account.alias, "email": account.email ?? NSNull(),
+                "loggedIn": account.loggedIn, "error": account.error ?? NSNull(),
+                "checkedAt": account.checkedAt?.timeIntervalSince1970 ?? NSNull(),
+                "groups": account.groups.map { group -> [String: Any] in
+                    [
+                        "id": group.id, "label": group.label,
+                        "fiveHour": window(group.fiveHourWindow(now: now)),
+                        "sevenDay": window(group.sevenDayWindow(now: now)),
+                        "pace": group.sevenDayWindow(now: now)?.pacePercent ?? NSNull(),
+                        "floors": [group.fiveHourFloor.map { $0 as Any } ?? NSNull(), group.sevenDayFloor.map { $0 as Any } ?? NSNull()]
+                    ]
+                }
+            ]
+        }
     ]
 }
 
@@ -188,6 +204,34 @@ class GrandeClaudexTests(unittest.TestCase):
         ))
         self.assertEqual([w["id"] for w in parsed["workers"]], ["gc-worker1", "gc-worker2"])
         self.assertEqual(parsed["chief"], "chief@example.com")
+
+    def test_antigravity_accounts_carry_their_quota_groups(self):
+        agy = worker(id="ag-1", alias="talisca", kind="antigravity", email="one@example.com", login_email="one@example.com",
+                     checked_at="2026-11-24T15:32:20.364777+00:00", quota_groups=[
+                         {"id": "gemini", "label": "Gemini", "five_hour": 0.25, "five_hour_resets_at": NOW + 3600,
+                          "seven_day": 0.5, "seven_day_resets_at": NOW + 3 * DAY, "seven_day_pace": 0.5,
+                          "five_hour_floor": 0.25, "seven_day_floor": 0.3},
+                         {"id": "3p", "label": "Claude/GPT", "five_hour": 0.0, "five_hour_resets_at": None,
+                          "seven_day": 1.0, "seven_day_resets_at": NOW - 60, "seven_day_pace": None,
+                          "five_hour_floor": None, "seven_day_floor": None}])
+        parsed = self.parse(payload(worker(id="gc-worker1"), agy, worker(id="ag-2", alias="cenk", kind="antigravity")))
+        # Claude workers stay apart from the Antigravity accounts.
+        self.assertEqual([w["id"] for w in parsed["workers"]], ["gc-worker1"])
+        self.assertEqual([a["id"] for a in parsed["antigravity"]], ["ag-1", "ag-2"])
+        one, two = parsed["antigravity"]
+        self.assertEqual((one["alias"], one["email"], one["loggedIn"], one["error"]), ("talisca", "one@example.com", True, None))
+        gemini, other = one["groups"]
+        self.assertEqual((gemini["id"], gemini["label"]), ("gemini", "Gemini"))
+        self.assertEqual(gemini["fiveHour"], {"remaining": 75, "reset": 3600, "hasReset": False})
+        self.assertEqual(gemini["sevenDay"], {"remaining": 50, "reset": 3 * DAY, "hasReset": False})
+        self.assertEqual(gemini["pace"], 50)
+        self.assertEqual(gemini["floors"], [0.25, 0.3])
+        self.assertEqual(other["fiveHour"], {"remaining": 100, "reset": None, "hasReset": False})
+        # A weekly window whose reset has passed is full again.
+        self.assertEqual(other["sevenDay"], {"remaining": 100, "reset": None, "hasReset": True})
+        self.assertEqual(other["floors"], [None, None])
+        # A gdc without quota_groups gives an account with no groups, not a missing one.
+        self.assertEqual(two["groups"], [])
 
     def test_utilization_becomes_remaining_with_reset_countdown(self):
         parsed = self.parse(payload(worker(five_hour=0.04, seven_day=0.5, seven_day_resets_at=NOW + 90_000)))

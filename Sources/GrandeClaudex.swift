@@ -90,6 +90,41 @@ extension GrandeClaudexWorker {
     }
 }
 
+/// One quota group of an Antigravity account, as agy's `/usage` splits it ("Gemini Models";
+/// "Claude and GPT models"), with its own 5-hour and weekly window. Use is a fraction of 0...1.
+struct AntigravityQuotaGroup: Equatable {
+    let id: String
+    let label: String
+    let fiveHour: Double?
+    let fiveHourResetsAt: Date?
+    let sevenDay: Double?
+    let sevenDayResetsAt: Date?
+    let sevenDayPace: Double?
+    /// What GrandeClaudex leaves untouched (fractions left; nil when it may use the window up).
+    let fiveHourFloor: Double?
+    let sevenDayFloor: Double?
+
+    func fiveHourWindow(now: Date = Date()) -> GrandeClaudexWindow? {
+        GrandeClaudexWindow(used: fiveHour, resetsAt: fiveHourResetsAt, now: now)
+    }
+
+    func sevenDayWindow(now: Date = Date()) -> GrandeClaudexWindow? {
+        GrandeClaudexWindow(used: sevenDay, resetsAt: sevenDayResetsAt, now: now, weekly: true, reportedPace: sevenDayPace)
+    }
+}
+
+/// A GrandeClaudex Antigravity worker (Google's agy on a Google AI Pro account), from
+/// `gdc usage --json`'s `quota_groups`. gdc reads it on the Mac the account lives on.
+struct AntigravityAccount: Equatable {
+    let id: String
+    let alias: String
+    let email: String?
+    let loggedIn: Bool
+    let groups: [AntigravityQuotaGroup]
+    let checkedAt: Date?
+    let error: String?
+}
+
 struct GrandeClaudexSnapshot: Equatable {
     let chief: String?
     /// The chief account's own limits (the Mac's default Claude Code login), when gdc reports them
@@ -97,6 +132,8 @@ struct GrandeClaudexSnapshot: Equatable {
     let chiefUsage: GrandeClaudexWorker?
     let generatedAt: Date?
     let workers: [GrandeClaudexWorker]
+    /// The Antigravity tab's accounts, in gdc's order.
+    var antigravity: [AntigravityAccount] = []
 }
 
 extension GrandeClaudexSnapshot {
@@ -160,7 +197,36 @@ enum GrandeClaudexCLI {
             chief: nonEmpty(json["chief"]),
             chiefUsage: (json["chief_usage"] as? [String: Any]).flatMap(worker(from:)),
             generatedAt: date(json["generated_at"]),
-            workers: rows.compactMap(worker(from:))
+            workers: rows.compactMap(worker(from:)),
+            antigravity: rows.compactMap(antigravity(from:))
+        )
+    }
+
+    /// An `antigravity` record; nil for any other kind. A gdc without `quota_groups` gives none.
+    private static func antigravity(from row: [String: Any]) -> AntigravityAccount? {
+        guard (row["kind"] as? String) == "antigravity", let id = nonEmpty(row["id"]) else { return nil }
+        let groups = ((row["quota_groups"] as? [[String: Any]]) ?? []).compactMap { group -> AntigravityQuotaGroup? in
+            guard let groupID = nonEmpty(group["id"]) else { return nil }
+            return AntigravityQuotaGroup(
+                id: groupID,
+                label: nonEmpty(group["label"]) ?? groupID,
+                fiveHour: fraction(group["five_hour"]),
+                fiveHourResetsAt: epoch(group["five_hour_resets_at"]),
+                sevenDay: fraction(group["seven_day"]),
+                sevenDayResetsAt: epoch(group["seven_day_resets_at"]),
+                sevenDayPace: number(group["seven_day_pace"]),
+                fiveHourFloor: fraction(group["five_hour_floor"]),
+                sevenDayFloor: fraction(group["seven_day_floor"])
+            )
+        }
+        return AntigravityAccount(
+            id: id,
+            alias: nonEmpty(row["alias"]) ?? id,
+            email: nonEmpty(row["login_email"]) ?? nonEmpty(row["email"]),
+            loggedIn: flag(row["logged_in"]),
+            groups: groups,
+            checkedAt: date(row["checked_at"]),
+            error: nonEmpty(row["error"])
         )
     }
 
@@ -194,9 +260,16 @@ enum GrandeClaudexCLI {
     /// `gdc usage --json`, or with `probe` `gdc usage --json --probe`, which reads every worker's
     /// limits again first. Blocks until gdc exits or the timeout stops it, so call it off the main
     /// thread.
-    static func fetch(probe: Bool, executable: String? = nil, timeout: TimeInterval? = nil) -> Result<GrandeClaudexSnapshot, Failure> {
-        run(["usage", "--json"] + (probe ? ["--probe"] : []), executable: executable, timeout: timeout ?? defaultTimeout(probe: probe))
+    /// `ids` reads only those workers (and no chief record), e.g. the Antigravity accounts alone.
+    static func fetch(probe: Bool, ids: [String] = [], executable: String? = nil, timeout: TimeInterval? = nil) -> Result<GrandeClaudexSnapshot, Failure> {
+        run(["usage", "--json"] + (probe ? ["--probe"] : []) + ids, executable: executable, timeout: timeout ?? defaultTimeout(probe: probe))
             .flatMap { data in parse(data).map { .success($0) } ?? .failure(.unreadable) }
+    }
+
+    /// `gdc ag cost --json`: the Antigravity accounts' token use per day and model, read on the
+    /// Mac they live on, as gdc printed it (`AntigravityCost` prices it). Blocking.
+    static func antigravityCost(executable: String? = nil, timeout: TimeInterval = 180) -> Result<Data, Failure> {
+        run(["ag", "cost", "--json"], executable: executable, timeout: timeout)
     }
 
     /// `gdc chief-seat --json`: the account Claude Desktop runs the chief on. Blocking.
