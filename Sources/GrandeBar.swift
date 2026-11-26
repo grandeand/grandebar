@@ -6607,7 +6607,7 @@ extension QuotaViewController {
     }
 
     /// "Move the Chief To": every saved login with room and its numbers, from the last gdc read,
-    /// then those without room, greyed out with the reason.
+    /// then those without room with the reason; those can be chosen too, the confirmation warns.
     private func chiefTargetsMenuItem() -> NSMenuItem {
         let item = NSMenuItem(title: L.text("Move the Chief To", "Şefi şuraya taşı"), action: nil, keyEquivalent: "")
         let submenu = NSMenu()
@@ -6639,10 +6639,12 @@ extension QuotaViewController {
         if !plan.skipped.isEmpty {
             submenu.addItem(.separator())
             note(L.text("No room now:", "Şu an yeri olmayanlar:"))
+            // Still clickable: the choice is abi's; the confirmation repeats the warning.
             for option in plan.skipped {
-                let entry = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-                entry.attributedTitle = Self.accountMenuTitle(option.account?.alias ?? option.email, details: [ChiefMove.skipText(option, turkish: turkish)])
-                entry.isEnabled = false
+                guard let alias = option.account?.alias else { continue }
+                let entry = menuItem(alias, #selector(moveChiefToChosen(_:)), represented: alias)
+                entry.attributedTitle = Self.accountMenuTitle(alias, details: [ChiefMove.skipText(option, turkish: turkish)])
+                entry.toolTip = ChiefMove.line(option, turkish: turkish)
                 submenu.addItem(entry)
             }
         }
